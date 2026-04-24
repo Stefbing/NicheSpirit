@@ -1,4 +1,0 @@
-INFO:     127.0.0.1:62445 - "GET /api/dashboard/data HTTP/1.1" 200 OK
-INFO:     127.0.0.1:62445 - "POST /api/auth/login HTTP/1.1" 200 OK
-INFO:     127.0.0.1:62445 - "GET /api/hot/trends HTTP/1.1" 200 OK
-INFO:     127.0.0.1:62445 - "GET /api/devices/list?user_id=1 HTTP/1.1" 200 OK
