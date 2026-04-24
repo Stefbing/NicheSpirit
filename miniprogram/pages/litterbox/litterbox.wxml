@@ -1,0 +1,41 @@
+<view class="page screen">
+  <view class="bg-grid"></view>
+  <view class="bg-orb one"></view>
+  <view class="bg-orb two"></view>
+
+  <view class="content">
+    <view class="card hero">
+      <view class="eyebrow">PetKit · Litterbox Console</view>
+      <view class="hero-title" style="margin-top: 18rpx;">猫厕所控制台</view>
+      <view class="hero-subtitle">清理、除臭和状态同步都在这里完成，操作后自动刷新设备列表。</view>
+      <view class="btn-row" style="margin-top: 22rpx;">
+        <button class="action-btn" bindtap="loadDevices">刷新设备</button>
+      </view>
+      <view class="sub" style="color: rgba(248,250,252,.82);">{{statusText}}</view>
+    </view>
+
+    <view class="section">
+      <view class="section-head">
+        <view class="section-title">设备列表</view>
+        <view class="section-meta">在线状态 / 余量 / 异味</view>
+      </view>
+      <view class="card-list">
+        <view class="device-card" wx:for="{{devices}}" wx:key="id" wx:for-index="index" style="animation-delay: {{index * 0.08}}s;">
+          <view class="device-top">
+            <view>
+              <view class="device-name">{{item.name}}</view>
+              <view class="device-meta">{{item.model}} · {{item.status}} · {{item.last_cleaned_at}}</view>
+            </view>
+            <view class="status-dot {{item.status === 'online' ? '' : 'warn'}}"></view>
+          </view>
+          <view class="sub">今日访问 {{item.stats.today_visits}} 次 · 平均 {{item.stats.avg_duration}}</view>
+          <view class="meter"><view class="meter-bar" style="width: {{item.sand_level}}%;"></view></view>
+          <view class="btn-row" style="margin-top: 16rpx;">
+            <button class="action-btn" data-id="{{item.id}}" bindtap="cleanDevice">立即清理</button>
+            <button class="ghost-btn" data-id="{{item.id}}" bindtap="deodorizeDevice">除臭</button>
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

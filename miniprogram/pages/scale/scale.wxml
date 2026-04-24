@@ -1,0 +1,49 @@
+<view class="page screen">
+  <view class="bg-grid"></view>
+  <view class="bg-orb one"></view>
+  <view class="bg-orb two"></view>
+
+  <view class="content">
+    <view class="card hero">
+      <view class="eyebrow">Xiaomi · Body Sync</view>
+      <view class="hero-title" style="margin-top: 18rpx;">体脂秤与云同步</view>
+      <view class="hero-subtitle">登录小米云后自动推送最新体重记录，保证本地与云端状态一致。</view>
+      <view class="btn-row" style="margin-top: 22rpx;">
+        <button class="action-btn" bindtap="loginXiaomi">登录小米云</button>
+        <button class="ghost-btn" bindtap="pushLatestWeight">推送最新体重</button>
+        <button class="plain-btn" bindtap="loadData">刷新</button>
+      </view>
+      <view class="sub" style="color: rgba(248,250,252,.82);">{{statusText}}</view>
+    </view>
+
+    <view class="section">
+      <view class="section-head">
+        <view class="section-title">云端状态</view>
+        <view class="section-meta">{{xiaomiStatus.connected ? '已连接' : '未连接'}}</view>
+      </view>
+      <view class="card">
+        <view class="title">{{xiaomiStatus.message || '同步状态'}}</view>
+        <view class="sub">最近同步：{{xiaomiStatus.last_sync_at || '暂无'}}</view>
+      </view>
+    </view>
+
+    <view class="section">
+      <view class="section-head">
+        <view class="section-title">历史记录</view>
+        <view class="section-meta">体重 / BMI / 体脂 / 肌肉</view>
+      </view>
+      <view class="card-list">
+        <view class="device-card" wx:for="{{history}}" wx:key="id" wx:for-index="index" style="animation-delay: {{index * 0.06}}s;">
+          <view class="device-top">
+            <view>
+              <view class="device-name">{{item.weight}} kg</view>
+              <view class="device-meta">BMI {{item.bmi}} · 体脂 {{item.body_fat}}%</view>
+            </view>
+            <view class="status-dot {{item.xiaomi_pushed ? '' : 'warn'}}"></view>
+          </view>
+          <view class="sub">肌肉 {{item.muscle}}% · 水分 {{item.water}}% · 已推送 {{item.xiaomi_pushed ? '是' : '否'}}</view>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

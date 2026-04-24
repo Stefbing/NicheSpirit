@@ -1,0 +1,29 @@
+<view class="page screen">
+  <view class="bg-grid"></view>
+  <view class="bg-orb one"></view>
+  <view class="bg-orb two"></view>
+
+  <view class="content">
+    <view class="card hero">
+      <view class="eyebrow">Connection · Settings</view>
+      <view class="hero-title" style="margin-top: 18rpx;">连接设置</view>
+      <view class="hero-subtitle">配置真实后端地址，真机请填写电脑局域网 IP，保证所有控制都走真实链路。</view>
+      <view class="sub" style="color: rgba(248,250,252,.82); margin-top: 18rpx;">{{message}}</view>
+    </view>
+
+    <view class="section">
+      <view class="section-head">
+        <view class="section-title">后端地址</view>
+        <view class="section-meta">例如 http://192.168.1.23:8000</view>
+      </view>
+      <view class="card">
+        <input class="input" value="{{apiBase}}" placeholder="例如 http://192.168.1.23:8000" bindinput="onInputApiBase" />
+        <view class="hint">真机必须填电脑局域网 IP，不能用 127.0.0.1。127.0.0.1 只代表手机自己。</view>
+        <view class="btn-row" style="margin-top: 18rpx;">
+          <button class="action-btn" loading="{{testing}}" bindtap="testConnection">测试连接</button>
+          <button class="ghost-btn" bindtap="saveSettings">保存设置</button>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

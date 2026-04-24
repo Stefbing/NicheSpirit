@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AutoHome 控制中心</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">A</div>
+          <div>
+            <p class="eyebrow">AUTOMATION HOME</p>
+            <h1>AutoHome</h1>
+          </div>
+        </div>
+        <nav class="nav">
+          <button class="nav-item is-active" data-tab="dashboard">总览</button>
+          <button class="nav-item" data-tab="litterbox">猫厕所</button>
+          <button class="nav-item" data-tab="feeder">喂食器</button>
+          <button class="nav-item" data-tab="health">健康监测</button>
+          <button class="nav-item" data-tab="config">系统配置</button>
+        </nav>
+        <div class="sidebar-card">
+          <p>模式</p>
+          <strong>米家风演示控制台</strong>
+          <span>暖白底、圆角卡片、浅阴影和高信息密度布局</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">家庭设备中枢</p>
+            <h2 id="scene-title">加载中</h2>
+          </div>
+          <div class="topbar-actions">
+            <button id="refresh-all" class="ghost-btn">刷新状态</button>
+            <button id="xiaomi-login" class="primary-btn">连接小米云</button>
+          </div>
+        </header>
+
+        <section class="hero-card">
+          <div>
+            <p id="scene-subtitle">正在同步设备数据</p>
+            <div id="overview-grid" class="overview-grid"></div>
+          </div>
+          <div class="hero-aside">
+            <p class="muted">空间设备</p>
+            <div id="room-list" class="room-list"></div>
+          </div>
+        </section>
+
+        <section class="content-grid">
+          <div class="panel span-2" data-panel="dashboard">
+            <div class="panel-head">
+              <h3>首页聚合数据</h3>
+              <span class="tag">每 60 秒缓存</span>
+            </div>
+            <div id="dashboard-devices" class="device-grid"></div>
+          </div>
+
+          <div class="panel" data-panel="litterbox">
+            <div class="panel-head">
+              <h3>猫厕所控制</h3>
+              <span class="tag">PetKit</span>
+            </div>
+            <div id="litterbox-list" class="stack"></div>
+          </div>
+
+          <div class="panel" data-panel="feeder">
+            <div class="panel-head">
+              <h3>喂食器</h3>
+              <span class="tag">CloudPets</span>
+            </div>
+            <div id="feeder-card" class="stack"></div>
+          </div>
+
+          <div class="panel span-2" data-panel="health">
+            <div class="panel-head">
+              <h3>体重趋势</h3>
+              <span class="tag">最近 7 次</span>
+            </div>
+            <div id="health-chart" class="chart"></div>
+            <div id="health-history" class="history-list"></div>
+          </div>
+
+          <div class="panel" data-panel="config">
+            <div class="panel-head">
+              <h3>系统配置</h3>
+              <span class="tag">加密保存</span>
+            </div>
+            <form id="config-form" class="config-form">
+              <input name="key" placeholder="配置键，例如 petkit_account" required />
+              <input name="value" placeholder="配置值" required />
+              <input name="platform" placeholder="平台，例如 petkit" />
+              <input name="device_name" placeholder="设备名称" />
+              <label class="checkbox">
+                <input type="checkbox" name="is_encrypted" checked />
+                <span>加密保存</span>
+              </label>
+              <button class="primary-btn" type="submit">保存配置</button>
+            </form>
+            <div id="config-list" class="config-list"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+  </html>

@@ -1,0 +1,59 @@
+<view class="page screen">
+  <view class="bg-grid"></view>
+  <view class="bg-orb one"></view>
+  <view class="bg-orb two"></view>
+
+  <view class="content">
+    <view class="card hero">
+      <view class="eyebrow">CloudPets · Feeding Console</view>
+      <view class="hero-title" style="margin-top: 18rpx;">喂食器控制台</view>
+      <view class="hero-subtitle">支持手动投喂、计划管理和状态刷新，操作后实时同步后端缓存。</view>
+      <view class="pill-row" style="margin-top: 22rpx;">
+        <view class="chip">今日 {{servingsToday}} 份</view>
+        <view class="chip">{{plans.length}} 个计划</view>
+      </view>
+      <view class="btn-row" style="margin-top: 22rpx;">
+        <button class="action-btn" bindtap="feedNow" data-serving="1">喂 1 份</button>
+        <button class="ghost-btn" bindtap="feedNow" data-serving="2">喂 2 份</button>
+        <button class="plain-btn" bindtap="loadData">刷新</button>
+      </view>
+      <view class="sub" style="color: rgba(248,250,252,.82);">{{statusText}}</view>
+    </view>
+
+    <view class="section">
+      <view class="section-head">
+        <view class="section-title">添加计划</view>
+        <view class="section-meta">立刻写入后端</view>
+      </view>
+      <view class="card">
+        <view class="sub">填写时间和份数，保存后会自动刷新计划列表。</view>
+        <input class="input" type="time" value="{{newPlan.time}}" data-field="time" bindinput="setNewPlanField" />
+        <input class="input" type="number" value="{{newPlan.serving}}" data-field="serving" bindinput="setNewPlanField" />
+        <view class="sub" style="margin-top: 12rpx;">启用状态：{{newPlan.enable ? '开启' : '关闭'}}</view>
+        <button class="action-btn" bindtap="addPlan">添加计划</button>
+      </view>
+    </view>
+
+    <view class="section">
+      <view class="section-head">
+        <view class="section-title">全天计划</view>
+        <view class="section-meta">启用 / 停用 / 删除</view>
+      </view>
+      <view class="card-list">
+        <view class="mini-card" wx:for="{{plans}}" wx:key="id">
+          <view class="device-top">
+            <view>
+              <view class="device-name">{{item.time}}</view>
+              <view class="device-meta">{{item.serving}} 份 · {{item.enable ? '启用' : '停用'}}</view>
+            </view>
+            <view class="status-dot {{item.enable ? '' : 'warn'}}"></view>
+          </view>
+          <view class="btn-row" style="margin-top: 16rpx;">
+            <button class="ghost-btn" data-id="{{item.id}}" bindtap="togglePlan">{{item.enable ? '停用' : '启用'}}</button>
+            <button class="danger-btn" data-id="{{item.id}}" bindtap="deletePlan">删除</button>
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

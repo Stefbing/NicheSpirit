@@ -1,0 +1,2 @@
+INFO:     127.0.0.1:65025 - "GET /api/petkit/devices HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65025 - "POST /api/petkit/clean HTTP/1.1" 501 Not Implemented
