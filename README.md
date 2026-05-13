@@ -43,6 +43,8 @@ AutoHome 是一个轻量级的家庭智能设备聚合控制平台，旨在通�
 # Windows
 powershell -c "irm https://astral.sh/uv/install.ps1 | iwr"
 
+C:\Users\Administrator\.local\bin 添加环境变量
+
 # macOS/Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
@@ -50,7 +52,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 #### 步骤 2: 安装依赖
 ```bash
 # 使用 uv 安装依赖（推荐）
-uv pip install -r requirements.txt
+uv pip install -r requirements.txt 或者 uv sync
 
 # 或使用传统方式
 pip install -r requirements.txt
