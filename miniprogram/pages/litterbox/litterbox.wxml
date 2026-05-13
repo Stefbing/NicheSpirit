@@ -1,41 +1,150 @@
-<view class="page screen">
-  <view class="bg-grid"></view>
-  <view class="bg-orb one"></view>
-  <view class="bg-orb two"></view>
-
-  <view class="content">
-    <view class="card hero">
-      <view class="eyebrow">PetKit · Litterbox Console</view>
-      <view class="hero-title" style="margin-top: 18rpx;">猫厕所控制台</view>
-      <view class="hero-subtitle">清理、除臭和状态同步都在这里完成，操作后自动刷新设备列表。</view>
-      <view class="btn-row" style="margin-top: 22rpx;">
-        <button class="action-btn" bindtap="loadDevices">刷新设备</button>
+<view class="page">
+  <!-- Hero卡片 - 设备状态概览 -->
+  <view class="hero-card">
+    <view class="device-header">
+      <view class="device-info">
+        <view class="device-icon">🚽</view>
+        <view class="device-text">
+          <text class="device-name">{{stats.device_name || 'PetKit猫厕所'}}</text>
+          <view class="device-status">
+            <view class="status-dot online"></view>
+            <text class="status-text">在线</text>
+          </view>
+        </view>
       </view>
-      <view class="sub" style="color: rgba(248,250,252,.82);">{{statusText}}</view>
+      <button class="refresh-btn {{refreshing ? 'loading' : ''}}" bindtap="refreshData" loading="{{refreshing}}" disabled="{{refreshing}}">
+        <text wx:if="{{!refreshing}}">刷新</text>
+      </button>
+    </view>
+  </view>
+
+  <!-- 加载骨架屏 -->
+  <view wx:if="{{loading}}" class="loading-stack">
+    <view class="stats-grid">
+      <view class="stat-card skeleton-card" wx:for="{{[1, 2, 3, 4]}}" wx:key="*this">
+        <view class="skeleton-line mini"></view>
+        <view class="skeleton-line large"></view>
+        <view class="skeleton-line small"></view>
+      </view>
     </view>
 
-    <view class="section">
-      <view class="section-head">
-        <view class="section-title">设备列表</view>
-        <view class="section-meta">在线状态 / 余量 / 异味</view>
+    <view class="card skeleton-panel">
+      <view class="skeleton-line medium"></view>
+      <view class="skeleton-line wide"></view>
+      <view class="skeleton-badge-row" wx:for="{{[1, 2, 3]}}" wx:key="*this">
+        <view class="skeleton-line medium"></view>
+        <view class="skeleton-chip"></view>
       </view>
-      <view class="card-list">
-        <view class="device-card" wx:for="{{devices}}" wx:key="id" wx:for-index="index" style="animation-delay: {{index * 0.08}}s;">
-          <view class="device-top">
-            <view>
-              <view class="device-name">{{item.name}}</view>
-              <view class="device-meta">{{item.model}} · {{item.status}} · {{item.last_cleaned_at}}</view>
-            </view>
-            <view class="status-dot {{item.status === 'online' ? '' : 'warn'}}"></view>
+    </view>
+  </view>
+
+  <!-- 数据统计卡片 -->
+  <block wx:else>
+    <view class="stats-grid">
+      <view class="stat-card visits-card">
+        <view class="stat-icon">📊</view>
+        <view class="stat-content">
+          <text class="stat-label">今日如厕</text>
+          <view class="stat-value">
+            <text class="stat-number">{{stats.today_visits || 0}}</text>
+            <text class="stat-unit">次</text>
           </view>
-          <view class="sub">今日访问 {{item.stats.today_visits}} 次 · 平均 {{item.stats.avg_duration}}</view>
-          <view class="meter"><view class="meter-bar" style="width: {{item.sand_level}}%;"></view></view>
-          <view class="btn-row" style="margin-top: 16rpx;">
-            <button class="action-btn" data-id="{{item.id}}" bindtap="cleanDevice">立即清理</button>
-            <button class="ghost-btn" data-id="{{item.id}}" bindtap="deodorizeDevice">除臭</button>
+        </view>
+      </view>
+
+      <view class="stat-card duration-card">
+        <view class="stat-icon">⏱️</view>
+        <view class="stat-content">
+          <text class="stat-label">平均时长</text>
+          <view class="stat-value">
+            <text class="stat-number">{{stats.avg_duration || 0}}</text>
+            <text class="stat-unit">秒</text>
+          </view>
+        </view>
+      </view>
+
+      <view class="stat-card weight-card">
+        <view class="stat-icon">⚖️</view>
+        <view class="stat-content">
+          <text class="stat-label">最近体重</text>
+          <view class="stat-value">
+            <text class="stat-number">{{stats.last_pet_weight || 0}}</text>
+            <text class="stat-unit">kg</text>
+          </view>
+        </view>
+      </view>
+
+      <view class="stat-card sand-card">
+        <view class="stat-icon">🏖️</view>
+        <view class="stat-content">
+          <text class="stat-label">猫砂余量</text>
+          <view class="stat-value">
+            <text class="stat-number">{{stats.sand_percent || 0}}</text>
+            <text class="stat-unit">%</text>
           </view>
         </view>
       </view>
     </view>
-  </view>
+
+    <!-- 快捷操作卡片 -->
+    <view class="action-card">
+      <view class="card-header">
+        <text class="card-title">设备操作</text>
+        <text class="card-subtitle">立即执行清理任务</text>
+      </view>
+      <button class="clean-btn {{actionLoading ? 'loading' : ''}}"
+              bindtap="cleanNow"
+              disabled="{{actionLoading}}"
+              loading="{{actionLoading}}">
+        <text wx:if="{{!actionLoading}}">🧹 立即清理</text>
+        <text wx:else>清理中...</text>
+      </button>
+    </view>
+
+    <!-- 状态详情卡片 -->
+    <view class="detail-card">
+      <view class="card-header">
+        <text class="card-title">状态详情</text>
+      </view>
+
+      <view class="detail-list">
+        <view class="detail-item highlight">
+          <view class="detail-left">
+            <text class="detail-icon">💧</text>
+            <text class="detail-label">除臭液剩余</text>
+          </view>
+          <text class="detail-value primary">{{stats.deodorant_days || 0}} 天</text>
+        </view>
+
+        <view wx:if="{{stats.frequent_restroom !== undefined}}" class="detail-item">
+          <view class="detail-left">
+            <text class="detail-icon">⚠️</text>
+            <text class="detail-label">频繁如厕</text>
+          </view>
+          <view class="detail-badge {{stats.frequent_restroom ? 'danger' : 'safe'}}">
+            {{stats.frequent_restroom ? '需关注' : '正常'}}
+          </view>
+        </view>
+
+        <view wx:if="{{stats.box_full !== undefined}}" class="detail-item">
+          <view class="detail-left">
+            <text class="detail-icon">🗑️</text>
+            <text class="detail-label">集便仓</text>
+          </view>
+          <view class="detail-badge {{stats.box_full ? 'danger' : 'safe'}}">
+            {{stats.box_full ? '已满' : '正常'}}
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <!-- 警告信息 -->
+    <view class="warning-card" wx:if="{{stats.warning}}">
+      <view class="warning-icon">⚠️</view>
+      <view class="warning-content">
+        <text class="warning-title">提醒</text>
+        <text class="warning-text">{{stats.warning}}</text>
+      </view>
+    </view>
+  </block>
 </view>

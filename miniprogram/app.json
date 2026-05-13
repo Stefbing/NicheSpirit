@@ -1,17 +1,18 @@
 {
   "pages": [
     "pages/index/index",
-    "pages/litterbox/litterbox",
+    "pages/config/config",
     "pages/feeder/feeder",
-    "pages/scale/scale",
-    "pages/settings/settings"
+    "pages/litterbox/litterbox",
+    "pages/scale/scale"
   ],
   "window": {
-    "navigationBarTitleText": "AutoHome",
-    "navigationBarBackgroundColor": "#ffffff",
-    "navigationBarTextStyle": "black",
-    "backgroundColor": "#f5f6f8"
+    "backgroundTextStyle": "light",
+    "navigationBarBackgroundColor": "#3B82F6",
+    "navigationBarTitleText": "物联四方",
+    "navigationBarTextStyle": "white"
   },
   "style": "v2",
+  "lazyCodeLoading": "requiredComponents",
   "sitemapLocation": "sitemap.json"
 }

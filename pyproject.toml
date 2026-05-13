@@ -1,0 +1,31 @@
+[project]
+name = "auto-home"
+version = "0.1.0"
+description = "Smart Home Controller Backend"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pypetkitapi",
+    "python-dotenv",
+    "sqlmodel",
+    "pymysql",
+    "aiohttp",
+    "httpx",
+    "requests",
+    "pydantic",
+    "psycopg2-binary",
+    "cryptography",
+    "pycryptodome",
+    "pillow",
+    "charset-normalizer",
+    "colorama"
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/app", "backend/static"]

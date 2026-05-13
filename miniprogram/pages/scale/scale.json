@@ -1,5 +1,6 @@
 {
-  "navigationBarTitleText": "体脂秤",
+  "navigationBarTitleText": "",
+  "usingComponents": {},
   "enablePullDownRefresh": true,
   "backgroundTextStyle": "dark"
 }

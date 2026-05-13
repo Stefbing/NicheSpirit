@@ -1,5 +1,6 @@
 {
-  "navigationBarTitleText": "猫厕所",
+  "navigationBarTitleText": "",
+  "usingComponents": {},
   "enablePullDownRefresh": true,
   "backgroundTextStyle": "dark"
 }

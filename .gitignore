@@ -1,39 +1,27 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-venv/
-ENV/
 env/
-*.egg-info/
-dist/
-build/
-
-# Database
+.env
+.venv
 *.db
-*.sqlite
-*.sqlite3
-
-# Logs
 *.log
+uv.lock
 
 # IDE
 .idea/
 .vscode/
-*.swp
-*.swo
+*.iml
 
-# OS
+# System
 .DS_Store
 Thumbs.db
 
-# Environment
-.env
-!.env.example
+# WeChat Miniprogram
+node_modules/
+miniprogram_npm/
+miniprogram/project.private.config.json
 
-# Test files
-petkit_*.log
-server*.log
-add_petkit_password.py
+# Vercel
+.vercel/
+.lingma/

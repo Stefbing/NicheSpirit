@@ -1,1 +1,547 @@
+/* 全局页面样式 - UI/UX Pro Max 设计系统 */
+page {
+  background: linear-gradient(180deg, #F8FAFC 0%, #FFFFFF 100%);
+  overflow: hidden;
+}
 
+.page {
+  height: 100vh;
+  padding-bottom: 40rpx;
+  box-sizing: border-box;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ========== Hero卡片 - 设备状态 ========== */
+.hero-card {
+  margin: 24rpx 32rpx;
+  padding: 32rpx;
+  background: linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 100%);
+  border-radius: 24rpx;
+  box-shadow: 0 4rpx 16rpx rgba(37, 99, 235, 0.08),
+              0 0 0 1rpx rgba(255, 255, 255, 0.5) inset;
+}
+
+.hero-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.device-info {
+  display: flex;
+  align-items: center;
+  gap: 20rpx;
+}
+
+.device-icon {
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 20rpx;
+  background: linear-gradient(135deg, #FEF3C7 0%, #FDE68A 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 44rpx;
+  box-shadow: 0 4rpx 12rpx rgba(0, 0, 0, 0.08);
+}
+
+.device-text {
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
+}
+
+.device-name {
+  font-size: 30rpx;
+  font-weight: 700;
+  color: #1E293B;
+  letter-spacing: 0.5rpx;
+}
+
+.device-status {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+}
+
+.status-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2rpx rgba(255, 255, 255, 0.8);
+}
+
+.status-dot.online {
+  background: linear-gradient(135deg, #10B981 0%, #059669 100%);
+  box-shadow: 0 0 8rpx rgba(16, 185, 129, 0.4);
+}
+
+.status-text {
+  font-size: 24rpx;
+  color: #64748B;
+  font-weight: 500;
+}
+
+.hero-badge {
+  padding: 10rpx 20rpx;
+  border-radius: 999rpx;
+  background: rgba(255, 255, 255, 0.9);
+  color: #2563EB;
+  font-size: 24rpx;
+  font-weight: 600;
+  box-shadow: 0 2rpx 8rpx rgba(37, 99, 235, 0.1);
+}
+
+/* ========== 快速投喂卡片 ========== */
+.action-card {
+  margin: 0 32rpx 24rpx;
+  padding: 32rpx;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10rpx);
+  border-radius: 24rpx;
+  box-shadow: 0 4rpx 16rpx rgba(0, 0, 0, 0.04),
+              0 0 0 1rpx rgba(0, 0, 0, 0.02) inset;
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24rpx;
+}
+
+.card-title {
+  font-size: 32rpx;
+  font-weight: 700;
+  color: #1E293B;
+  letter-spacing: 0.5rpx;
+}
+
+.card-subtitle {
+  font-size: 24rpx;
+  color: #94A3B8;
+  display: block;
+}
+
+.manage-link {
+  font-size: 26rpx;
+  color: #2563EB;
+  font-weight: 600;
+  padding: 8rpx 16rpx;
+  border-radius: 12rpx;
+  background: rgba(37, 99, 235, 0.06);
+  transition: all 0.3s;
+}
+
+.manage-link:active {
+  background: rgba(37, 99, 235, 0.12);
+  transform: scale(0.96);
+}
+
+.add-plan-btn {
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 14rpx;
+  background: rgba(37, 99, 235, 0.08);
+  color: #2563EB;
+  border: none;
+  transition: all 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.add-plan-btn::after {
+  border: none;
+}
+
+.add-plan-btn .iconfont {
+  font-size: 32rpx;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.add-plan-btn:active {
+  background: rgba(37, 99, 235, 0.15);
+  transform: scale(0.92);
+}
+
+.feed-control {
+  display: flex;
+  flex-direction: column;
+  gap: 24rpx;
+}
+
+.amount-selector {
+  display: flex;
+  gap: 16rpx;
+}
+
+.amount-btn {
+  flex: 1;
+  height: 72rpx;
+  line-height: 72rpx;
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #64748B;
+  background: #F1F5F9;
+  border-radius: 16rpx;
+  border: 2rpx solid transparent;
+  padding: 0;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.amount-btn::after {
+  border: none;
+}
+
+.amount-btn.active {
+  color: #2563EB;
+  background: rgba(37, 99, 235, 0.08);
+  border-color: #2563EB;
+  box-shadow: 0 0 0 4rpx rgba(37, 99, 235, 0.1);
+}
+
+.amount-btn:active {
+  transform: scale(0.96);
+}
+
+.feed-btn {
+  width: 100%;
+  height: 96rpx;
+  line-height: 96rpx;
+  font-size: 32rpx;
+  font-weight: 700;
+  color: #FFFFFF;
+  background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
+  border-radius: 20rpx;
+  border: none;
+  padding: 0;
+  box-shadow: 0 8rpx 24rpx rgba(37, 99, 235, 0.3),
+              0 0 0 1rpx rgba(255, 255, 255, 0.2) inset;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  letter-spacing: 1rpx;
+}
+
+.feed-btn::after {
+  border: none;
+}
+
+.feed-btn:active:not([disabled]) {
+  transform: translateY(-2rpx) scale(0.98);
+  box-shadow: 0 12rpx 32rpx rgba(37, 99, 235, 0.35);
+}
+
+.feed-btn[disabled] {
+  opacity: 0.7;
+}
+
+/* ========== 喂食计划卡片 ========== */
+.plan-card {
+  margin: 0 32rpx;
+  padding: 32rpx;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10rpx);
+  border-radius: 24rpx;
+  box-shadow: 0 4rpx 16rpx rgba(0, 0, 0, 0.04),
+              0 0 0 1rpx rgba(0, 0, 0, 0.02) inset;
+}
+
+.plan-list {
+  margin-top: 8rpx;
+}
+
+.plan-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 24rpx 0;
+  border-bottom: 1rpx solid #F1F5F9;
+}
+
+.plan-item:last-child {
+  border-bottom: none;
+}
+
+.plan-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.plan-actions {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-left: 16rpx;
+}
+
+.delete-plan-btn {
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 14rpx;
+  background: rgba(239, 68, 68, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s;
+}
+
+.delete-plan-btn .iconfont {
+  font-size: 32rpx;
+  opacity: 0.6;
+  transition: all 0.3s;
+}
+
+.delete-plan-btn:active {
+  background: rgba(239, 68, 68, 0.12);
+  transform: scale(0.92);
+}
+
+.delete-plan-btn:active .iconfont {
+  opacity: 1;
+}
+
+.plan-time {
+  font-size: 32rpx;
+  font-weight: 700;
+  color: #1E293B;
+  margin-bottom: 8rpx;
+  letter-spacing: 0.5rpx;
+}
+
+.plan-detail {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+}
+
+.plan-amount {
+  font-size: 24rpx;
+  color: #64748B;
+  font-weight: 500;
+}
+
+.plan-separator {
+  font-size: 24rpx;
+  color: #CBD5E1;
+}
+
+.plan-status {
+  font-size: 24rpx;
+  font-weight: 500;
+}
+
+.plan-status.enabled {
+  color: #10B981;
+}
+
+.plan-status.disabled {
+  color: #94A3B8;
+}
+
+/* 空状态 */
+.empty-plan {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 60rpx 0 40rpx;
+  gap: 16rpx;
+}
+
+.empty-icon {
+  font-size: 80rpx;
+  opacity: 0.6;
+}
+
+.empty-text {
+  font-size: 28rpx;
+  color: #94A3B8;
+  font-weight: 500;
+}
+
+.add-plan-link {
+  font-size: 26rpx;
+  color: #2563EB;
+  font-weight: 600;
+  padding: 12rpx 24rpx;
+  border-radius: 12rpx;
+  background: rgba(37, 99, 235, 0.06);
+  margin-top: 8rpx;
+  transition: all 0.3s;
+}
+
+.add-plan-link:active {
+  background: rgba(37, 99, 235, 0.12);
+  transform: scale(0.96);
+}
+
+/* 骨架屏 */
+.plan-skeleton {
+  margin-top: 8rpx;
+}
+
+.skeleton-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 24rpx 0;
+  border-bottom: 1rpx solid #F1F5F9;
+}
+
+.skeleton-item:last-child {
+  border-bottom: none;
+}
+
+.skeleton-main {
+  flex: 1;
+}
+
+.skeleton-line {
+  height: 24rpx;
+  border-radius: 999rpx;
+  background: linear-gradient(90deg, #F1F5F9 25%, #E2E8F0 50%, #F1F5F9 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.skeleton-line.strong {
+  width: 180rpx;
+}
+
+.skeleton-line.short {
+  width: 120rpx;
+  margin-top: 16rpx;
+}
+
+.skeleton-switch {
+  width: 84rpx;
+  height: 46rpx;
+  margin-left: 24rpx;
+  border-radius: 999rpx;
+  background: linear-gradient(90deg, #F1F5F9 25%, #E2E8F0 50%, #F1F5F9 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* ========== 弹窗 ========== */
+.modal-mask {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8rpx);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-box {
+  width: 600rpx;
+  max-width: 85vw;
+  background: rgba(255, 255, 255, 0.98);
+  backdrop-filter: blur(20rpx);
+  border-radius: 24rpx;
+  padding: 40rpx 32rpx;
+  box-shadow: 0 20rpx 60rpx rgba(0, 0, 0, 0.2),
+              0 0 0 1rpx rgba(255, 255, 255, 0.5) inset;
+  animation: modalSlideUp 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes modalSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(60rpx) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.modal-title {
+  font-size: 32rpx;
+  font-weight: 700;
+  color: #1F2937;
+  text-align: center;
+  margin-bottom: 32rpx;
+  letter-spacing: 0.5rpx;
+}
+
+.modal-form {
+  padding: 40rpx 32rpx 32rpx;
+}
+
+.form-group {
+  margin-bottom: 24rpx;
+}
+
+.form-label {
+  display: block;
+  font-size: 26rpx;
+  color: #374151;
+  margin-bottom: 12rpx;
+  font-weight: 600;
+}
+
+.picker-value {
+  width: 100%;
+  height: 80rpx;
+  line-height: 80rpx;
+  font-size: 28rpx;
+  padding: 0 20rpx;
+  background: #F8FAFC;
+  border-radius: 14rpx;
+  border: 2rpx solid transparent;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  color: #1E293B;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-value:active {
+  background: #FFFFFF;
+  border-color: #3B82F6;
+  box-shadow: 0 0 0 4rpx rgba(59, 130, 246, 0.1);
+}
+
+.submit-btn {
+  width: 100%;
+  height: 80rpx;
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #FFFFFF;
+  background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
+  border-radius: 14rpx;
+  border: none;
+  margin-top: 12rpx;
+  box-shadow: 0 8rpx 24rpx rgba(59, 130, 246, 0.3);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.submit-btn::after {
+  border: none;
+}
+
+.submit-btn:active {
+  transform: scale(0.98);
+  box-shadow: 0 4rpx 12rpx rgba(59, 130, 246, 0.2);
+}

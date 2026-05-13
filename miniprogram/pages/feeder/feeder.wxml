@@ -1,59 +1,115 @@
-<view class="page screen">
-  <view class="bg-grid"></view>
-  <view class="bg-orb one"></view>
-  <view class="bg-orb two"></view>
-
-  <view class="content">
-    <view class="card hero">
-      <view class="eyebrow">CloudPets · Feeding Console</view>
-      <view class="hero-title" style="margin-top: 18rpx;">喂食器控制台</view>
-      <view class="hero-subtitle">支持手动投喂、计划管理和状态刷新，操作后实时同步后端缓存。</view>
-      <view class="pill-row" style="margin-top: 22rpx;">
-        <view class="chip">今日 {{servingsToday}} 份</view>
-        <view class="chip">{{plans.length}} 个计划</view>
-      </view>
-      <view class="btn-row" style="margin-top: 22rpx;">
-        <button class="action-btn" bindtap="feedNow" data-serving="1">喂 1 份</button>
-        <button class="ghost-btn" bindtap="feedNow" data-serving="2">喂 2 份</button>
-        <button class="plain-btn" bindtap="loadData">刷新</button>
-      </view>
-      <view class="sub" style="color: rgba(248,250,252,.82);">{{statusText}}</view>
-    </view>
-
-    <view class="section">
-      <view class="section-head">
-        <view class="section-title">添加计划</view>
-        <view class="section-meta">立刻写入后端</view>
-      </view>
-      <view class="card">
-        <view class="sub">填写时间和份数，保存后会自动刷新计划列表。</view>
-        <input class="input" type="time" value="{{newPlan.time}}" data-field="time" bindinput="setNewPlanField" />
-        <input class="input" type="number" value="{{newPlan.serving}}" data-field="serving" bindinput="setNewPlanField" />
-        <view class="sub" style="margin-top: 12rpx;">启用状态：{{newPlan.enable ? '开启' : '关闭'}}</view>
-        <button class="action-btn" bindtap="addPlan">添加计划</button>
-      </view>
-    </view>
-
-    <view class="section">
-      <view class="section-head">
-        <view class="section-title">全天计划</view>
-        <view class="section-meta">启用 / 停用 / 删除</view>
-      </view>
-      <view class="card-list">
-        <view class="mini-card" wx:for="{{plans}}" wx:key="id">
-          <view class="device-top">
-            <view>
-              <view class="device-name">{{item.time}}</view>
-              <view class="device-meta">{{item.serving}} 份 · {{item.enable ? '启用' : '停用'}}</view>
-            </view>
-            <view class="status-dot {{item.enable ? '' : 'warn'}}"></view>
-          </view>
-          <view class="btn-row" style="margin-top: 16rpx;">
-            <button class="ghost-btn" data-id="{{item.id}}" bindtap="togglePlan">{{item.enable ? '停用' : '启用'}}</button>
-            <button class="danger-btn" data-id="{{item.id}}" bindtap="deletePlan">删除</button>
+<view class="page">
+  <!-- Hero卡片 - 设备状态概览 -->
+  <view class="hero-card">
+    <view class="hero-top">
+      <view class="device-info">
+        <view class="device-icon">🍖</view>
+        <view class="device-text">
+          <text class="device-name">{{deviceName || '云宠喂食器'}}</text>
+          <view class="device-status">
+            <view class="status-dot online"></view>
+            <text class="status-text">在线</text>
           </view>
         </view>
       </view>
+      <view class="hero-badge">今日已喂 {{todayServings}} 次</view>
+    </view>
+  </view>
+
+  <!-- 快速投喂卡片 -->
+  <view class="action-card">
+    <view class="card-header">
+      <text class="card-title">快速投喂</text>
+      <text class="card-subtitle">一键执行单次投喂</text>
+    </view>
+    
+    <view class="feed-control">
+      <view class="amount-selector">
+        <button class="amount-btn {{feedAmount === 1 ? 'active' : ''}}" bindtap="setFeedAmount" data-amount="1">1份</button>
+        <button class="amount-btn {{feedAmount === 2 ? 'active' : ''}}" bindtap="setFeedAmount" data-amount="2">2份</button>
+        <button class="amount-btn {{feedAmount === 3 ? 'active' : ''}}" bindtap="setFeedAmount" data-amount="3">3份</button>
+      </view>
+      
+      <button class="feed-btn {{actionLoading ? 'loading' : ''}}" 
+              bindtap="feedOne" 
+              loading="{{actionLoading}}" 
+              disabled="{{actionLoading}}">
+        <text wx:if="{{!actionLoading}}">立即投喂 {{feedAmount}} 份</text>
+        <text wx:else>投喂中...</text>
+      </button>
+    </view>
+  </view>
+
+  <!-- 喂食计划卡片 -->
+  <view class="plan-card">
+    <view class="card-header">
+      <view>
+        <text class="card-title">喂食计划</text>
+      </view>
+      <button class="add-plan-btn" bindtap="showAddPlanModal">
+        <text class="iconfont">+</text>
+      </button>
+    </view>
+
+    <!-- 加载骨架屏 -->
+    <view wx:if="{{loading}}" class="plan-skeleton">
+      <view class="skeleton-item" wx:for="{{[1, 2, 3]}}" wx:key="*this">
+        <view class="skeleton-main">
+          <view class="skeleton-line strong"></view>
+          <view class="skeleton-line short"></view>
+        </view>
+        <view class="skeleton-switch"></view>
+      </view>
+    </view>
+
+    <!-- 计划列表 -->
+    <view wx:elif="{{plans.length > 0}}" class="plan-list">
+      <view wx:for="{{plans}}" wx:key="id" class="plan-item">
+        <view class="plan-left">
+          <view class="plan-time">{{item.time}}</view>
+          <view class="plan-detail">
+            <text class="plan-amount">{{item.amount}} 份</text>
+            <text class="plan-separator">·</text>
+            <text class="plan-status {{item.enabled ? 'enabled' : 'disabled'}}">{{item.enabled ? '启用' : '停用'}}</text>
+          </view>
+        </view>
+        <view class="plan-actions">
+          <switch color="#F59E0B" checked="{{item.enabled}}" data-index="{{index}}" bindchange="togglePlan"/>
+          <view class="delete-plan-btn" data-id="{{item.id}}" bindtap="deletePlan">
+            <text class="iconfont">🗑️</text>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <!-- 空状态 -->
+    <view wx:else class="empty-plan">
+      <view class="empty-icon">📅</view>
+      <text class="empty-text">暂无喂食计划</text>
+      <button class="add-plan-link" bindtap="showAddPlanModal">添加计划</button>
+    </view>
+  </view>
+
+  <!-- 添加计划弹窗 -->
+  <view wx:if="{{showAddPlanDialog}}" class="modal-mask" bindtap="closeAddPlanModal">
+    <view class="modal-box modal-form" catchtap="stopPropagation">
+      <view class="modal-title">添加喂食计划</view>
+
+      <view class="form-group">
+        <text class="form-label">时间</text>
+        <picker mode="time" value="{{planTime}}" bindchange="onPlanTimeChange">
+          <view class="picker-value">{{planTime || '请选择时间'}}</view>
+        </picker>
+      </view>
+
+      <view class="form-group">
+        <text class="form-label">份量</text>
+        <picker mode="selector" range="{{[1, 2, 3, 4, 5]}}" value="{{planAmountIndex}}" bindchange="onPlanAmountChange">
+          <view class="picker-value">{{planAmount || 1}} 份</view>
+        </picker>
+      </view>
+
+      <button class="submit-btn" bindtap="submitPlan">确认添加</button>
     </view>
   </view>
 </view>

@@ -1,49 +1,282 @@
-<view class="page screen">
-  <view class="bg-grid"></view>
-  <view class="bg-orb one"></view>
-  <view class="bg-orb two"></view>
-
-  <view class="content">
-    <view class="card hero">
-      <view class="eyebrow">Xiaomi · Body Sync</view>
-      <view class="hero-title" style="margin-top: 18rpx;">体脂秤与云同步</view>
-      <view class="hero-subtitle">登录小米云后自动推送最新体重记录，保证本地与云端状态一致。</view>
-      <view class="btn-row" style="margin-top: 22rpx;">
-        <button class="action-btn" bindtap="loginXiaomi">登录小米云</button>
-        <button class="ghost-btn" bindtap="pushLatestWeight">推送最新体重</button>
-        <button class="plain-btn" bindtap="loadData">刷新</button>
-      </view>
-      <view class="sub" style="color: rgba(248,250,252,.82);">{{statusText}}</view>
-    </view>
-
-    <view class="section">
-      <view class="section-head">
-        <view class="section-title">云端状态</view>
-        <view class="section-meta">{{xiaomiStatus.connected ? '已连接' : '未连接'}}</view>
-      </view>
-      <view class="card">
-        <view class="title">{{xiaomiStatus.message || '同步状态'}}</view>
-        <view class="sub">最近同步：{{xiaomiStatus.last_sync_at || '暂无'}}</view>
-      </view>
-    </view>
-
-    <view class="section">
-      <view class="section-head">
-        <view class="section-title">历史记录</view>
-        <view class="section-meta">体重 / BMI / 体脂 / 肌肉</view>
-      </view>
-      <view class="card-list">
-        <view class="device-card" wx:for="{{history}}" wx:key="id" wx:for-index="index" style="animation-delay: {{index * 0.06}}s;">
-          <view class="device-top">
-            <view>
-              <view class="device-name">{{item.weight}} kg</view>
-              <view class="device-meta">BMI {{item.bmi}} · 体脂 {{item.body_fat}}%</view>
+<view class="page">
+    <!-- Hero卡片 - 设备状态概览 -->
+    <view class="hero-card {{pulseAnimation ? 'pulse' : ''}}">
+        <view class="device-header">
+            <view class="device-info">
+                <view class="device-icon">⚖️</view>
+                <view class="device-text">
+                    <text class="device-name">{{connectedDevice ? connectedDevice.name : '小米体脂秤2'}}</text>
+                    <view class="device-status">
+                        <view class="status-dot {{deviceOnlineStatus === 'online' ? 'connected' : 'disconnected'}}"></view>
+                        <text class="status-text">{{deviceOnlineStatus === 'online' ? '在线' : '离线'}}</text>
+                    </view>
+                </view>
             </view>
-            <view class="status-dot {{item.xiaomi_pushed ? '' : 'warn'}}"></view>
-          </view>
-          <view class="sub">肌肉 {{item.muscle}}% · 水分 {{item.water}}% · 已推送 {{item.xiaomi_pushed ? '是' : '否'}}</view>
+
+            <!-- 重置控制区域 -->
+            <view class="reset-controls" wx:if="{{appState === 'completed' && resetTimer}}">
+                <view class="countdown-badge">
+                    <text class="countdown-number">{{resetCountdown}}</text>
+                    <text class="countdown-unit">s</text>
+                </view>
+                <view class="control-buttons">
+                    <button class="btn-cancel" bindtap="cancelReset" size="mini">取消</button>
+                    <button class="btn-reset" bindtap="immediateReset" size="mini">重置</button>
+                </view>
+            </view>
         </view>
-      </view>
     </view>
-  </view>
+
+    <!-- 实时体重仪表盘 -->
+    <view class="gauge-section" wx:if="{{appState !== 'idle' || weight > 0 || connectedDevice || members.length > 0}}">
+        <view class="gauge-card">
+            <view class="gauge-viewport">
+                <view class="gauge-container">
+                    <block wx:for="{{61}}" wx:key="index">
+                        <view class="tick {{index % 10 === 0 ? 'major' : (index % 5 === 0 ? 'mid' : 'minor')}}"
+                              style="transform: rotate({{(index * 3) - 90}}deg);"></view>
+                    </block>
+                    <view class="gauge-labels">
+                        <text class="label-item l-0">0</text>
+                        <text class="label-item l-75">75</text>
+                        <text class="label-item l-150">150</text>
+                    </view>
+                </view>
+
+                <view class="needle-layer" style="transform: rotate({{needleAngle}}deg);">
+                    <view class="needle-blade"></view>
+                </view>
+
+                <view class="data-hub">
+                    <view class="weight-box {{isStabilized ? 'stable' : ''}} {{appState === 'measuring' ? 'breathing' : ''}}">
+                        <text class="weight-value">{{weightDisplay}}</text>
+                        <text class="weight-unit">kg</text>
+                    </view>
+
+                    <!-- 稳定性进度条（移至仪表盘） -->
+                    <view class="stability-progress-bar" wx:if="{{appState === 'measuring' && !isStabilized}}">
+                        <view class="progress-track">
+                            <view class="progress-fill" style="width: {{stabilityProgress}}%"></view>
+                        </view>
+                        <text class="progress-text">{{stabilityProgress}}%</text>
+                    </view>
+
+                    <!-- 状态药丸 -->
+                    <view class="status-pill {{isStabilized ? 'pill-stable' : 'pill-scan'}}" wx:if="{{appState !== 'completed'}}">
+                        <view class="pill-dot {{appState === 'measuring' ? 'breathing-dot' : ''}}"></view>
+                        <text>{{statusPillText}}</text>
+                    </view>
+
+                    <!-- 阻抗显示 -->
+                    <view class="impedance-display {{isStabilized ? 'stabilized' : ''}}" wx:if="{{impedance > 0 && appState === 'completed'}}">
+                        <text class="impedance-label">阻抗{{impedance}}Ω</text>
+                    </view>
+                </view>
+            </view>
+        </view>
+    </view>
+
+    <!-- 家庭成员选择 -->
+    <view class="member-section {{showMemberSection ? 'fade-in' : ''}}" wx:if="{{members.length > 0}}">
+        <view class="section-header">
+            <text class="section-title">家庭成员</text>
+            <view class="section-actions">
+                <text class="auto-match-hint" wx:if="{{matchedMember}}">✨ 自动匹配</text>
+                <button class="add-member-btn" bindtap="showAddMemberModal">
+                    <text class="iconfont">+</text>
+                </button>
+            </view>
+        </view>
+
+        <scroll-view class="member-list" scroll-x>
+            <view wx:for="{{members}}" wx:key="id"
+                  class="member-card {{selectedMemberId === item.id ? 'active' : ''}} {{matchedMember && matchedMember.id === item.id ? 'matched' : ''}}"
+                  bindtap="selectMember"
+                  bindlongpress="onLongPressMember"
+                  data-id="{{item.id}}"
+                  data-name="{{item.name}}">
+                <view class="member-avatar" style="background: {{item.avatarColor}}">
+                    <text class="avatar-text">{{item.name[0]}}</text>
+                </view>
+                <view class="member-content">
+                    <text class="member-name">{{item.name}}</text>
+                    <view class="member-info" wx:if="{{item.age || item.height}}">
+                        <text class="info-item" wx:if="{{item.age}}">{{item.age}}岁</text>
+                        <text class="info-divider" wx:if="{{item.age && item.height}}">|</text>
+                        <text class="info-item" wx:if="{{item.height}}">{{item.height}}cm</text>
+                    </view>
+                    <view class="member-stats" wx:if="{{item.lastWeight}}">
+                        <text class="member-weight">{{item.lastWeight}}kg</text>
+                        <text class="member-time">{{item.lastMeasureTime ? '近期' : ''}}</text>
+                    </view>
+                </view>
+                <view class="match-badge" wx:if="{{matchedMember && matchedMember.id === item.id}}">
+                    <text> ✓ </text>
+                </view>
+            </view>
+        </scroll-view>
+    </view>
+
+    <!-- 健康数据统计 -->
+    <view class="stats-grid {{appState === 'completed' && bodyFat ? 'fade-in' : ''}}" wx:if="{{appState === 'completed' && bodyFat}}">
+        <view class="stat-card">
+            <view class="stat-icon" style="background: linear-gradient(135deg, #DBEAFE 0%, #BFDBFE 100%);">⚖️</view>
+            <view class="stat-content">
+                <text class="stat-label">BMI指数</text>
+                <view class="stat-value">
+                    <text class="stat-number {{bmiRangeClass}}">{{bmi}}</text>
+                </view>
+                <text class="stat-range {{bmiRangeClass}}">{{bmiRangeText}} (18.5-24)</text>
+            </view>
+        </view>
+
+        <view class="stat-card">
+            <view class="stat-icon" style="background: linear-gradient(135deg, #FEF3C7 0%, #FDE68A 100%);">🥩</view>
+            <view class="stat-content">
+                <text class="stat-label">体脂率</text>
+                <view class="stat-value">
+                    <text class="stat-number {{bodyFatRangeClass}}">{{bodyFat}}</text>
+                    <text class="stat-unit">%</text>
+                </view>
+                <text class="stat-range {{bodyFatRangeClass}}">{{bodyFatNormalRange}}</text>
+            </view>
+        </view>
+
+        <view class="stat-card">
+            <view class="stat-icon" style="background: linear-gradient(135deg, #DBEAFE 0%, #BFDBFE 100%);">💧</view>
+            <view class="stat-content">
+                <text class="stat-label">水分率</text>
+                <view class="stat-value">
+                    <text class="stat-number {{waterRangeClass}}">{{water}}</text>
+                    <text class="stat-unit">%</text>
+                </view>
+                <text class="stat-range {{waterRangeClass}}">{{currentMember.gender === 'male' ? '55-65%' : '45-60%'}}</text>
+            </view>
+        </view>
+
+        <view class="stat-card">
+            <view class="stat-icon" style="background: linear-gradient(135deg, #FCE7F3 0%, #FBCFE8 100%);">💪</view>
+            <view class="stat-content">
+                <text class="stat-label">肌肉量</text>
+                <view class="stat-value">
+                    <text class="stat-number {{muscleRangeClass}}">{{muscleMass}}</text>
+                    <text class="stat-unit">kg</text>
+                </view>
+                <text class="stat-range {{muscleRangeClass}}">{{currentMember.gender === 'male' ? '45-60kg' : '35-50kg'}}</text>
+            </view>
+        </view>
+
+        <view class="stat-card">
+            <view class="stat-icon" style="background: linear-gradient(135deg, #FEF3C7 0%, #FDE68A 100%);">🍗</view>
+            <view class="stat-content">
+                <text class="stat-label">蛋白质</text>
+                <view class="stat-value">
+                    <text class="stat-number {{proteinRangeClass}}">{{protein}}</text>
+                    <text class="stat-unit">%</text>
+                </view>
+                <text class="stat-range {{proteinRangeClass}}">{{currentMember.gender === 'male' ? '16-20%' : '14-18%'}}</text>
+            </view>
+        </view>
+
+        <view class="stat-card">
+            <view class="stat-icon" style="background: linear-gradient(135deg, #FEE2E2 0%, #FECACA 100%);">🔥</view>
+            <view class="stat-content">
+                <text class="stat-label">基础代谢</text>
+                <view class="stat-value">
+                    <text class="stat-number {{bmrRangeClass}}">{{bmr}}</text>
+                    <text class="stat-unit">kcal</text>
+                </view>
+                <text class="stat-range {{bmrRangeClass}}">每日消耗</text>
+            </view>
+        </view>
+
+        <view class="stat-card">
+            <view class="stat-icon" style="background: linear-gradient(135deg, #E0E7FF 0%, #C7D2FE 100%);">🫀</view>
+            <view class="stat-content">
+                <text class="stat-label">内脏脂肪</text>
+                <view class="stat-value">
+                    <text class="stat-number {{visceralFatRangeClass}}">{{visceralFat}}</text>
+                </view>
+                <text class="stat-range {{visceralFatRangeClass}}">1-9</text>
+            </view>
+        </view>
+
+        <view class="stat-card">
+            <view class="stat-icon" style="background: linear-gradient(135deg, #F3E8FF 0%, #E9D5FF 100%);">🦴</view>
+            <view class="stat-content">
+                <text class="stat-label">骨量</text>
+                <view class="stat-value">
+                    <text class="stat-number {{boneRangeClass}}">{{boneMass}}</text>
+                    <text class="stat-unit">kg</text>
+                </view>
+                <text class="stat-range {{boneRangeClass}}">{{currentMember.gender === 'male' ? '2.5-4.0kg' : '2.0-3.5kg'}}</text>
+            </view>
+        </view>
+    </view>
+
+    <!-- 健康建议卡片 -->
+    <view class="advice-section {{appState === 'completed' && advice ? 'fade-in' : ''}}" wx:if="{{appState === 'completed' && advice}}">
+        <view class="advice-card {{adviceLevel}}">
+            <view class="advice-header">
+                <text class="advice-icon">{{adviceIcon}}</text>
+                <text class="advice-title">健康建议</text>
+            </view>
+            <view class="advice-body">
+                <text class="advice-text">{{advice}}</text>
+            </view>
+            <view class="advice-footer">
+                <text class="advice-time">{{currentMember.name || '当前成员'}} · {{currentMember.age}}岁 · {{currentMember.height}}cm</text>
+            </view>
+        </view>
+    </view>
+
+    <!-- 空状态 / 引导 -->
+    <view class="empty-state" wx:if="{{appState === 'idle' && members.length === 0}}">
+        <view class="empty-icon">👨‍👩‍👧‍👦</view>
+        <text class="empty-title">添加家庭成员</text>
+        <text class="empty-desc">添加成员后，体脂秤可自动识别并记录每个人的身体数据</text>
+        <button class="empty-btn" bindtap="showAddMemberModal">添加第一个成员</button>
+    </view>
+
+    <!-- 调试信息（开发时开启） -->
+    <view class="debug-panel" wx:if="{{false}}">
+        <text>ctrl: {{debugInfo.ctrlRaw}}</text>
+        <text>weightRaw: {{debugInfo.weightRaw}}</text>
+        <text>impRaw: {{debugInfo.impedanceRaw}}</text>
+        <text>quality: {{debugInfo.dataQuality}}</text>
+        <text>trend: {{debugInfo.trend}}</text>
+    </view>
+
+    <!-- 添加/编辑成员弹窗 -->
+    <view wx:if="{{showAddMemberDialog}}" class="modal-mask" bindtap="closeAddMemberModal">
+        <view class="modal-box modal-form" catchtap="stopPropagation">
+            <view class="modal-title">{{editingMemberId ? '编辑成员' : '添加家庭成员'}}</view>
+
+            <view class="form-group">
+                <text class="form-label">姓名 <text class="required">*</text></text>
+                <input class="form-input" placeholder="请输入姓名" value="{{newMemberName}}" bindinput="onMemberNameInput" />
+            </view>
+
+            <view class="form-row">
+                <view class="form-group half">
+                    <text class="form-label">年龄 <text class="required">*</text></text>
+                    <input class="form-input" type="number" placeholder="必填" value="{{newMemberAge}}" bindinput="onMemberAgeInput" />
+                </view>
+                <view class="form-group half">
+                    <text class="form-label">身高(cm) <text class="required">*</text></text>
+                    <input class="form-input" type="number" placeholder="必填" value="{{newMemberHeight}}" bindinput="onMemberHeightInput" />
+                </view>
+            </view>
+
+            <view class="form-group">
+                <text class="form-label">性别 <text class="required">*</text></text>
+                <picker mode="selector" range="{{['男', '女']}}" value="{{newMemberGenderIndex}}" bindchange="onMemberGenderChange">
+                    <view class="picker-value">{{newMemberGender || '请选择性别'}}</view>
+                </picker>
+            </view>
+
+            <button class="submit-btn" bindtap="submitAddMember">{{editingMemberId ? '保存修改' : '确认添加'}}</button>
+        </view>
+    </view>
+
 </view>
