@@ -38,25 +38,36 @@ AutoHome 是一个轻量级的家庭智能设备聚合控制平台，旨在通�
 *   Node.js v18+ (用于 Vercel CLI)
 *   微信开发者工具
 
-#### 步骤 1: 安装 uv（如果未安装）
+#### 步骤 1: 安装 uv
+
+如果你尚未安装 `uv`，请在终端中执行以下命令：
+
+**Windows (CMD)**
+```cmd
+powershell -c "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force; irm https://astral.sh/uv/install.ps1 | iex""
+```
+
+**Windows (PowerShell)**
+```powershell
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force; irm https://astral.sh/uv/install.ps1 | iex
+```
+
+**macOS/Linux**
 ```bash
-# Windows
-powershell -c "irm https://astral.sh/uv/install.ps1 | iwr"
-
-C:\Users\Administrator\.local\bin 添加环境变量
-
-# macOS/Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-#### 步骤 2: 安装依赖
-```bash
-# 使用 uv 安装依赖（推荐）
-uv pip install -r requirements.txt 或者 uv sync
+**提示**：安装完成后，如提示命令找不到，请确保将 `C:\Users\YourUsername\.local\bin` 自动或手动加入了系统的环境变量 Path 中，并重启终端。
 
-# 或使用传统方式
-pip install -r requirements.txt
+#### 步骤 2: 一键同步环境与依赖
+
+在项目根目录下，无需手动创建虚拟环境，直接运行以下命令：
+
+```powershell
+uv sync
 ```
+
+`uv` 会自动为你创建 `.venv` 虚拟环境，并根据 `requirements.txt`（或 `pyproject.toml`）极速同步安装所有依赖。
 
 #### 步骤 3: 数据库配置
 
@@ -68,20 +79,16 @@ DATABASE_URL=mysql+pymysql://user:password@host:3306/database
 ```
 
 **注意**：
-- 账号密码通过小程序首次登录后自动保存到数据库
-- 所有配置项存储在数据库 `systemconfig` 表中
+- 账号密码通过小程序首次登录后会自动保存到数据库。
+- 所有配置项存储在数据库的 `systemconfig` 表中。
+- 请将本地生成的 `.venv/` 目录加入 `.gitignore` 中，切勿提交。
 
 #### 步骤 4: 启动后端服务
 
-**方式 A：使用 uv（推荐）**
-```bash
-uv run uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
-```
+利用 `uv run` 命令，你无需手动激活虚拟环境，它会自动在当前项目的 `.venv` 中安全运行：
 
-**方式 B：传统方式**
-```bash
-cd backend
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```powershell
+uv run uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 启动成功后会看到：
@@ -93,22 +100,23 @@ PetKit 服务连接成功
 INFO:     Application startup complete.
 ```
 
-访问 `http://localhost:8000/docs` 查看 API 文档。
-
-#### 步骤 5: 启动小程序
-1.  使用微信开发者工具导入 `miniprogram` 目录
-2.  修改 `miniprogram/app.js` 中的 `apiBaseUrl`:
-    ```javascript
-    globalData: {
-      apiBaseUrl: "http://localhost:8000",  // 或你的服务器地址
-      environment: "development" // development | production
-    }
-    ```
-3.  点击“编译”即可预览
+访问 `http://localhost:8000/docs` 查看 Swagger API 文档。
 
 **测试连接**：
 - 访问 http://localhost:8000/api/dashboard/data 查看设备数据
 - 访问 http://localhost:8000/api/petkit/devices-stats 查看猫厕所状态
+
+#### 步骤 5: 启动小程序
+
+1. 使用微信开发者工具导入 `miniprogram` 目录。
+2. 修改 `miniprogram/app.js` 中的 `apiBaseUrl`:
+    ```javascript
+    globalData: {
+      apiBaseUrl: "http://localhost:8000",  // 本地联调地址
+      environment: "development"           // development | production
+    }
+    ```
+3. 点击"编译"即可在模拟器中预览。
 
 ### 2. Vercel 远程部署 (Deployment)
 
@@ -162,7 +170,7 @@ Can't connect to MySQL server
 
 **Q: integer out of range 错误？**
 ```
-(psycopg2.errors.NumericValueOutOfRange) integer out of range
+(pymysql.err.DataError) (1264, "Out of range value for column 'updated_at'")
 ```
 **解决**：这是时间戳字段溢出问题，已在代码中修复。如仍有此错误，执行以下 SQL：
 ```sql
@@ -192,4 +200,5 @@ Cannot connect to host api.petkit.cn:443
 3. 系统会自动重试，稍后再试即可
 
 ## 📝 维护者
-*   User & Trae (AI Assistant)
+*   [Stefbing](https://github.com/Stefbing)
+*   Trae (AI Assistant)
