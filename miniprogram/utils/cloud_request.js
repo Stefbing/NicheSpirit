@@ -5,14 +5,14 @@
 // 配置：切换运行环境
 const CONFIG = {
   // 'cloud' - 云托管模式, 'local' - 本地调试模式
-  mode: 'cloud',
+  mode: 'local',
 
   // 云托管配置
   cloudEnv: 'prod-d5g0so0137afcfdd5',
   cloudService: 'auto-home',
 
   // 本地调试配置（替换为你的本地后端地址）
-  localBaseUrl: 'http://192.168.1.4:8000'
+  localBaseUrl: 'http://192.168.1.3:8000'
 };
 
 let isCloudInitialized = false;
