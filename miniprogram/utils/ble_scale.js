@@ -8,13 +8,30 @@
  * - 体重/阻抗均为小端序
  */
 
+// 常量定义
+const WEIGHT_SCALE_FACTOR = 200.0; // 小米协议：Raw / 200 = KG
+const MIN_WEIGHT_KG = 1.0;
+const MAX_WEIGHT_KG = 220.0;
+const MIN_IMPEDANCE = 200;
+const MAX_IMPEDANCE = 2000;
+const REQUIRED_MIN_LENGTH = 13;
+const REQUIRED_MAX_LENGTH = 14;
+
+// 控制字节位掩码定义
+const CTRL_BIT_LBS = 0x0001;        // Bit 0: 英镑单位
+const CTRL_BIT_JIN = 0x0002;        // Bit 1: 斤单位
+const CTRL_BIT_WEIGHT_REMOVED = 0x0080;  // Bit 7: 下秤
+const CTRL_BIT_IMPEDANCE_VALID = 0x0200; // Bit 9: 阻抗有效
+const CTRL_BIT_STABILIZED_ALT = 0x0400;  // Bit 10: 稳定状态（备选）
+const CTRL_BIT_STABILIZED = 0x2000;      // Bit 13: 稳定状态
+
 /**
  * 主解析入口
  */
 function parse(buffer, macAddress = '') {
     // 小米体脂秤2只需要13-14字节的数据
-    if (!buffer || buffer.byteLength < 13 || buffer.byteLength > 14) {
-        console.log('[BLE] ⚠️ 数据长度不符合要求:', buffer ? buffer.byteLength : 0, '(需要13-14字节)');
+    if (!buffer || buffer.byteLength < REQUIRED_MIN_LENGTH || buffer.byteLength > REQUIRED_MAX_LENGTH) {
+        console.log('[BLE] ⚠️ 数据长度不符合要求:', buffer ? buffer.byteLength : 0, `(需要${REQUIRED_MIN_LENGTH}-${REQUIRED_MAX_LENGTH}字节)`);
         return null;
     }
 
@@ -22,106 +39,57 @@ function parse(buffer, macAddress = '') {
         const data = new Uint8Array(buffer);
         const timestamp = Date.now();
 
-        console.log('[BLE] 📦 原始字节:', Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' '));
-        debugger;
         const result = parseFull(data);
 
         if (result) {
             result.receivedAt = timestamp;
-            console.log('[BLE] ✅ 解析成功:', result);
-        } else {
-            console.log('[BLE] ❌ 解析结果为 null');
         }
         return result;
     } catch (err) {
-        console.error('[BLE] ❌ 解析异常:', err);
+        console.error('[BLE] ❌ 解析异常:', err.message || err);
         return null;
     }
 }
 
-/**
- * 8字节格式（Mi Scale 1）
- * 控制字节 (data[0]):
- * - bit 0: lbs unit
- * - bit 4: jin unit
- * - bit 5: stabilized
- * - bit 7: weight removed
- */
-function parseShort(data) {
-    const ctrl = data[0];
-    const weightRaw = (data[1] << 8) | data[0];
-    const isLbs = (ctrl & 0x01) !== 0;
-    const isJin = (ctrl & 0x10) !== 0;
-    const isStabilized = (ctrl & 0x20) !== 0;
-    const weightRemoved = (ctrl & 0x80) !== 0;
 
-    let scaleFactor = (isLbs || isJin) ? 100.0 : 200.0;
-    let weight = weightRaw / scaleFactor;
-    if (isLbs) weight *= 0.453592;
-    else if (isJin) weight *= 0.5;
-
-    if (weight <= 0.5 || weight > 220 || weightRemoved) return null;
-
-    return {
-        weight: Math.round(weight * 100) / 100,
-        isStabilized,
-        impedance: 0,
-        impedanceValid: false,
-        deviceTimestamp: null
-    };
-}
 
 /**
  * 彻底修正后的 13字节解析 (针对小米体脂秤 2)
  */
 function parseFull(data) {
     // 1. 提取控制字节 (小端序)
-    const ctrl = (data[1] << 8) | data[0]; // 例如: 0xa602
+    const ctrl = (data[1] << 8) | data[0];
 
-    /**
-     * 2. 正确的位掩码定义 (小米 2 代官方协议逆向)
-     * Bit 0: 英镑 (LBS)
-     * Bit 1: 斤 (Jin)
-     * Bit 7: 下秤 (Weight Removed)
-     * Bit 9: 阻抗有效 (Impedance Valid) - 极其重要！
-     * Bit 10: 体重稳定 (Stabilized)
-     * Bit 13: 测量完成 (Readied)
-     */
-    const isLbs = (ctrl & 0x0001) !== 0;
-    const isJin = (ctrl & 0x0002) !== 0;
-    const hasImpedance = (ctrl & 0x0200) !== 0; // 必须是 0x0200
-    const isStabilized = (ctrl & 0x2000) !== 0 || (ctrl & 0x0400) !== 0;
-    const weightRemoved = (ctrl & 0x0080) !== 0;
+    // 2. 解析控制标志位
+    const isLbs = (ctrl & CTRL_BIT_LBS) !== 0;
+    const isJin = (ctrl & CTRL_BIT_JIN) !== 0;
+    const hasImpedance = (ctrl & CTRL_BIT_IMPEDANCE_VALID) !== 0;
+    const isStabilized = (ctrl & CTRL_BIT_STABILIZED) !== 0 || (ctrl & CTRL_BIT_STABILIZED_ALT) !== 0;
+    const weightRemoved = (ctrl & CTRL_BIT_WEIGHT_REMOVED) !== 0;
 
-    // 3. 解析体重 (Index 11, 12)
+    // 3. 解析体重 (Index 11, 12) - 小端序
     const weightRaw = (data[12] << 8) | data[11];
     // 小米协议：Raw 数据除以 200 始终等于 KG（无论秤上显示什么单位）
-    const weightKg = weightRaw / 200.0;
+    const weightKg = weightRaw / WEIGHT_SCALE_FACTOR;
 
-    // 4. 解析阻抗 (Index 9, 10)
+    // 4. 解析阻抗 (Index 9, 10) - 小端序
     let impedance = 0;
     let impedanceValid = false;
     if (hasImpedance) {
-        // 阻抗在第 9, 10 字节
         const impedanceRaw = (data[10] << 8) | data[9];
-        if (impedanceRaw > 0 && impedanceRaw < 3000) {
+        // 人体阻抗合理范围：200-2000 欧姆
+        if (impedanceRaw >= MIN_IMPEDANCE && impedanceRaw <= MAX_IMPEDANCE) {
             impedance = impedanceRaw;
             impedanceValid = true;
         }
     }
 
-    // 过滤掉下秤或无效的小体重
-    if (weightKg <= 1.0 || weightRemoved) {
-        console.log('[BLE] ⚠️ 数据被过滤:', {
-            weightKg,
-            weightRemoved,
-            ctrl: ctrl.toString(16),
-            weightRaw
-        });
+    // 5. 过滤无效数据：下秤、体重超出范围
+    if (weightRemoved || weightKg <= MIN_WEIGHT_KG || weightKg > MAX_WEIGHT_KG) {
         return null;
     }
 
-    // 5. 解析设备时间（UTC时间）
+    // 6. 解析设备时间（UTC时间）
     const year = (data[3] << 8) | data[2];
     const month = data[4];
     const day = data[5];
@@ -131,9 +99,10 @@ function parseFull(data) {
 
     // 使用 Date.UTC 生成 UTC 时间戳
     const deviceTimestamp = Date.UTC(year, month - 1, day, hour, minute, second);
-    debugger;
+
+    // 7. 返回解析结果
     return {
-        weight: Math.round(weightKg * 100) / 100, // 统一输出 KG
+        weight: Math.round(weightKg * 100) / 100, // 统一输出 KG（保留两位小数）
         impedance,
         impedanceValid,
         isStabilized,
