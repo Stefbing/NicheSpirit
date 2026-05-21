@@ -220,5 +220,27 @@ Page({
     } finally {
       wx.stopPullDownRefresh()
     }
+  },
+  
+  /**
+   * 转发给朋友 - 启用右上角菜单的"转发"功能
+   */
+  onShareAppMessage(res) {
+    return {
+      title: '我的智能猫厕所',
+      path: '/pages/litterbox/litterbox',
+      imageUrl: '' // 可选：自定义分享图片路径
+    }
+  },
+  
+  /**
+   * 分享到朋友圈 - 启用右上角菜单的"分享到朋友圈"功能
+   */
+  onShareTimeline() {
+    return {
+      title: '我的智能猫厕所',
+      query: '',
+      imageUrl: '' // 可选：自定义分享图片路径
+    }
   }
 });

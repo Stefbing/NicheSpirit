@@ -1317,5 +1317,27 @@ Page({
       console.error('[Scale] 删除成员失败:', err);
       wx.showToast({ title: '删除失败', icon: 'none' });
     }
+  },
+  
+  /**
+   * 转发给朋友 - 启用右上角菜单的"转发"功能
+   */
+  onShareAppMessage(res) {
+    return {
+      title: '我的智能体脂秤',
+      path: '/pages/scale/scale',
+      imageUrl: '' // 可选：自定义分享图片路径
+    }
+  },
+  
+  /**
+   * 分享到朋友圈 - 启用右上角菜单的"分享到朋友圈"功能
+   */
+  onShareTimeline() {
+    return {
+      title: '我的智能体脂秤',
+      query: '',
+      imageUrl: '' // 可选：自定义分享图片路径
+    }
   }
 });

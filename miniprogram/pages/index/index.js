@@ -702,5 +702,35 @@ Page({
     } finally {
       wx.stopPullDownRefresh()
     }
+  },
+  
+  /**
+   * 转发给朋友 - 启用右上角菜单的"转发"功能
+   */
+  onShareAppMessage(res) {
+    // 获取当前用户信息用于个性化分享
+    const userInfo = this.data.userInfo
+    const userName = userInfo ? (userInfo.nickname || '我的智能家') : '我的智能家'
+    
+    return {
+      title: `${userName}的智能设备中心`,
+      path: '/pages/index/index',
+      imageUrl: '' // 可选：自定义分享图片路径，留空使用默认截图
+    }
+  },
+  
+  /**
+   * 分享到朋友圈 - 启用右上角菜单的"分享到朋友圈"功能
+   */
+  onShareTimeline() {
+    // 获取当前用户信息用于个性化分享
+    const userInfo = this.data.userInfo
+    const userName = userInfo ? (userInfo.nickname || '我的智能家') : '我的智能家'
+    
+    return {
+      title: `${userName}的智能设备中心`,
+      query: '', // 分享给朋友圈时不携带参数，直接进入首页
+      imageUrl: '' // 可选：自定义分享图片路径
+    }
   }
 })

@@ -254,13 +254,57 @@ async def lifespan(app: FastAPI):
                                         stats = {}
                                 await cache_manager.set(cache_key, stats, ttl=180)
                     
+                    # 【新增】获取体脂秤统计数据
+                    scale_stats = {'today_count': 0, 'latest_body_fat': None}
+                    if has_xiaomi:
+                        try:
+                            from datetime import datetime, timedelta
+                            from .models.models import WeightRecord
+                            from sqlmodel import select
+                            from .models.db import engine  # 【修复】导入 engine
+                            
+                            loop = asyncio.get_running_loop()
+                            
+                            def _query_scale_stats():
+                                with Session(engine) as db_session:
+                                    # 计算今天的开始和结束时间戳（毫秒）
+                                    today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+                                    today_end = int(datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp() * 1000)
+                                    
+                                    # 查询今日测量次数
+                                    stmt_today_count = select(WeightRecord).where(
+                                        WeightRecord.user_id == uid,
+                                        WeightRecord.timestamp >= today_start,
+                                        WeightRecord.timestamp <= today_end
+                                    ).order_by(WeightRecord.timestamp.desc())
+                                    today_records = db_session.exec(stmt_today_count).all()
+                                    today_count = len(today_records)
+                                    
+                                    # 查询最新一次测量的体脂率
+                                    latest_body_fat = None
+                                    if today_records:
+                                        latest_record = today_records[0]
+                                        if latest_record.body_fat:
+                                            latest_body_fat = round(latest_record.body_fat, 1)
+                                    
+                                    return {
+                                        'today_count': today_count,
+                                        'latest_body_fat': latest_body_fat
+                                    }
+                            
+                            scale_stats = await loop.run_in_executor(None, _query_scale_stats)
+                            logger.info(f'[Background Refresh] User {uid} - 今日测量: {scale_stats["today_count"]}, 最新体脂: {scale_stats["latest_body_fat"]}')
+                        except Exception as e:
+                            logger.error(f'[Background Refresh] 获取体脂秤统计失败: {e}')
+                    
                     # 构建组合缓存
                     dashboard_data = {
                         'petkit_devices': petkit_devices,
                         'litterbox_stats': {},
                         'cloudpets_servings': locals().get('servings', {}),
                         'cloudpets_plans': locals().get('plans', []),
-                        'xiaomi_config': bool(xiaomi_account and xiaomi_password)  # 【修复】动态检查
+                        'xiaomi_config': bool(xiaomi_account and xiaomi_password),  # 【修复】动态检查
+                        'scale_stats': scale_stats  # 【新增】添加体脂秤统计数据
                     }
                     await cache_manager.set(f'{cache_prefix}_dashboard_combined_data', dashboard_data, ttl=120)
                     
@@ -366,6 +410,8 @@ async def force_refresh_cache(user_id: Optional[int] = None):
         await cache_manager.delete(f'{cache_prefix}_petkit_devices')
         await cache_manager.delete(f'{cache_prefix}_cloudpets_servings')
         await cache_manager.delete(f'{cache_prefix}_cloudpets_plans')
+        # 【新增】清除体脂秤统计相关缓存（如果有）
+        await cache_manager.delete(f'{cache_prefix}_scale_stats')
         
         logger.info(f"Cache refreshed for user {user_id}")
         return {"status": "success", "message": "缓存已清除，下次访问将重新加载"}
