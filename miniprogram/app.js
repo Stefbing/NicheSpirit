@@ -34,13 +34,21 @@ App({
     cachedDashboardData: null,
     dashboardCacheTime: 0,
     dashboardFetching: false,  // 防止并发请求
-    dashboardFetchPromise: null  // 共享同一个Promise
+    dashboardFetchPromise: null,  // 共享同一个Promise
+
+    // 时间同步相关
+    timeSyncInProgress: false,  // 时间同步进行中标志
+    lastTimeSyncDeviceId: null,  // 上次执行时间同步的设备ID
+    lastTimeSyncTimestamp: 0,  // 上次执行时间同步的时间戳
+    
+    // 页面跳转锁
+    scalePageNavigationInFlight: false  // 防止重复跳转到称重页
   },
 
   onLaunch() {
     try {
       // 初始化云开发
-      const config = require('./utils/cloud_request.js').getConfig ? require('./utils/cloud_request.js').getConfig() : null;
+      const config = cloudRequest.getConfig ? cloudRequest.getConfig() : null;
       if (config && config.mode === 'cloud') {
         cloudRequest.initCloud();
       }
@@ -48,9 +56,8 @@ App({
       // 检查登录状态，初始化蓝牙
       const userInfo = wx.getStorageSync('userInfo');
       if (userInfo && userInfo.user_id) {
-        var self = this;
-        setTimeout(function() {
-          self.checkAndInitBluetooth(userInfo.user_id);
+        setTimeout(() => {
+          this.checkAndInitBluetooth(userInfo.user_id);
         }, 500);
       }
     } catch (err) {
@@ -84,7 +91,7 @@ App({
 
     // 设置请求锁
     this.globalData.dashboardFetching = true;
-    
+
     // 创建新的请求Promise
     this.globalData.dashboardFetchPromise = new Promise((resolve, reject) => {
       cloudRequest.callContainer({
@@ -92,24 +99,26 @@ App({
         method: 'GET',
         success: (res) => {
           console.log('[App] 📦 Dashboard接口返回');
-          
+
           // 缓存数据
           this.globalData.cachedDashboardData = res;
           this.globalData.dashboardCacheTime = Date.now();
-          
+
           // 释放锁
           this.globalData.dashboardFetching = false;
           this.globalData.dashboardFetchPromise = null;
-          
+
           resolve(res);
         },
         fail: (err) => {
           console.error('[App] ❌ Dashboard接口失败:', err);
-          
-          // 释放锁
+
+          // 释放锁并清除缓存
           this.globalData.dashboardFetching = false;
           this.globalData.dashboardFetchPromise = null;
-          
+          this.globalData.cachedDashboardData = null;
+          this.globalData.dashboardCacheTime = 0;
+
           reject(err);
         }
       });
@@ -153,9 +162,9 @@ App({
 
         console.log('[BLE] 📦 接口返回:', res);
 
+
         // 注意：res 没有 data 字段，直接访问 xiaomi_config
         const hasXiaomiConfig = res.xiaomi_config === true;
-        console.log('[BLE] xiaomi_config:', hasXiaomiConfig);
 
         // 缓存结果
         this.globalData.xiaomiConfigChecked = true;
@@ -190,34 +199,31 @@ App({
   },
 
   initBluetoothManager() {
-    console.log('[BLE] 🚀 开始初始化蓝牙适配器...');
-
     // 清除旧的扫描数据，防止误触发跳转
     this.globalData.latestScaleData = null;
 
-    var self = this;
     wx.openBluetoothAdapter({
-      success: function() {
+      success: () => {
         console.log('[BLE] ✅ 蓝牙适配器初始化成功');
-        self.globalData.bleAdapterInitialized = true;
+        this.globalData.bleAdapterInitialized = true;
 
         // 监听设备发现
-        wx.onBluetoothDeviceFound(self.handleDeviceFound.bind(self));
+        wx.onBluetoothDeviceFound(this.handleDeviceFound.bind(this));
 
         // 监听适配器状态变化
-        wx.onBluetoothAdapterStateChange(function(res) {
-          self.globalData.bleAdapterInitialized = res.available;
+        wx.onBluetoothAdapterStateChange((res) => {
+          this.globalData.bleAdapterInitialized = res.available;
           if (!res.available) {
             console.warn('[BLE] ⚠️ 蓝牙适配器不可用');
           }
         });
 
         // 开始持续扫描（不再周期性停止）
-        self.startContinuousScan();
+        this.startContinuousScan();
       },
-      fail: function(err) {
+      fail: (err) => {
         console.error('[BLE] ❌ 蓝牙初始化失败:', err);
-        self.globalData.bleAdapterInitialized = false;
+        this.globalData.bleAdapterInitialized = false;
       }
     });
   },
@@ -261,45 +267,74 @@ App({
 
       if (!finalData) continue;
 
-      // 数据新鲜度检测（基于设备时间 vs 解析时实时时间）
+      // =====================
+      // 数据新鲜度检测（基于设备时间 vs 当前时间）
+      // =====================
       const deviceTimestamp = finalData.deviceTimestamp;
       if (!deviceTimestamp) {
         console.log('[BLE] ⚠️ 无设备时间戳，跳过');
         continue;
       }
 
-      // 设备广播的时间已经是北京时间，直接使用
+      const currentTime = Date.now();
+      const timeDiff = currentTime - deviceTimestamp; // 正数表示设备时间落后，负数表示超前
+      const timeDiffHours = timeDiff / (1000 * 60 * 60);
+
+      // =====================
+      // 异常时间判定与同步触发条件
+      // =====================
+      let shouldSyncTime = false;
+      let syncReason = '';
+
+      // 条件1：严重滞后 - 设备时间比当前时间落后超过24小时
+      if (timeDiffHours > 24) {
+        shouldSyncTime = true;
+        syncReason = `设备时间严重滞后 ${Math.round(timeDiffHours)} 小时`;
+      }
+      // 条件2：时间超前 - 设备时间超出当前时间（未来时间）
+      else if (timeDiffHours < 0) {
+        shouldSyncTime = true;
+        syncReason = `设备时间超前 ${Math.round(Math.abs(timeDiffHours))} 小时`;
+      }
+
+      if (shouldSyncTime) {
+        console.log(`[BLE] ⚠️ 检测到时间异常: ${syncReason}`);
+        // 异步执行时间同步，避免阻塞主线程
+        this.asyncTriggerTimeSync(device.deviceId);
+        // 时间异常时仍继续处理数据，但记录日志
+        console.log('[BLE] ⚠️ 注意：设备时间异常，数据可能不准确');
+      }
+
+      // =====================
+      // 数据新鲜度过滤（正常流程）
+      // =====================
       const parseTime = finalData.receivedAt; // 广播解析时的实时时间
-      const timeDiff = Math.abs(parseTime - deviceTimestamp);
+      const freshnessDiff = Math.abs(parseTime - deviceTimestamp);
 
-      console.log('[BLE] 🕒 设备时间:', new Date(deviceTimestamp).toLocaleString('zh-CN'));
-      console.log('[BLE] 🕒 解析时间:', new Date(parseTime).toLocaleString('zh-CN'));
-      console.log('[BLE] ⏱️ 时间差值:', Math.round(timeDiff), 'ms');
-
-      // 如果时间差超过10秒，视为过期
-      if (timeDiff >= CONFIG.FRESHNESS_THRESHOLD) {
+      // 如果时间差超过10秒，视为过期数据
+      if (freshnessDiff >= CONFIG.FRESHNESS_THRESHOLD) {
         console.log('[BLE] ⚠️ 数据过期，丢弃');
         continue;
       }
 
-        // 数据去重：检查是否与上次处理的数据相同
-        const isDuplicate = this.isDuplicateData(finalData);
-        if (isDuplicate) {
-          console.log('[BLE] ⚠️ 重复数据，跳过处理');
-          continue;
-        }
+      // 数据去重：检查是否与上次处理的数据相同
+      const isDuplicate = this.isDuplicateData(finalData);
+      if (isDuplicate) {
+        console.log('[BLE] ⚠️ 重复数据，跳过处理');
+        continue;
+      }
 
-        // 更新全局数据并发布
-        this.globalData.latestScaleData = {
-          ...finalData,
-          deviceId: device.deviceId,
-          RSSI: device.RSSI,
-          timestamp: parseTime
-        };
+      // 更新全局数据并发布
+      this.globalData.latestScaleData = {
+        ...finalData,
+        deviceId: device.deviceId,
+        RSSI: device.RSSI,
+        timestamp: parseTime
+      };
 
-        // 记录本次处理的数据
-        this.globalData.lastProcessedData = finalData;
-        this.globalData.lastProcessedTimestamp = Date.now();
+      // 记录本次处理的数据
+      this.globalData.lastProcessedData = finalData;
+      this.globalData.lastProcessedTimestamp = Date.now();
 
       this.notifyScaleListeners(this.globalData.latestScaleData);
 
@@ -308,9 +343,7 @@ App({
       this.globalData.scaleConnectionStatus = isOnline ? 'online' : 'offline';
 
       // 已在称重页则跳过跳转
-      const pages = getCurrentPages();
-      const currentPage = pages[pages.length - 1];
-      if (currentPage && currentPage.route === 'pages/scale/scale') {
+      if (this.isCurrentPage('pages/scale/scale')) {
         console.log('[BLE] ⏸️ 已在称重页，跳过');
         return;
       }
@@ -351,9 +384,8 @@ App({
     }
 
     // 返回取消订阅函数
-    var self = this;
-    return function() {
-      self.unsubscribeScaleData(callback);
+    return () => {
+      this.unsubscribeScaleData(callback);
     };
   },
 
@@ -371,13 +403,24 @@ App({
    * 通知所有订阅者
    */
   notifyScaleListeners(data) {
-    this.globalData.scaleListeners.forEach(function(cb) {
+    this.globalData.scaleListeners.forEach((cb) => {
       try {
         cb(data);
       } catch (err) {
         console.error('[BLE] 订阅者回调失败:', err);
       }
     });
+  },
+
+  /**
+   * 检查当前页面是否为指定路由
+   * @param {string} route - 要检查的路由
+   * @returns {boolean}
+   */
+  isCurrentPage(route) {
+    const pages = getCurrentPages();
+    const currentPage = pages[pages.length - 1];
+    return currentPage && currentPage.route === route;
   },
 
   /**
@@ -399,12 +442,7 @@ App({
       console.log('[BLE] 📦 成员接口返回:', res);
 
       // 注意：res 直接是 {code, data} 结构，或者就是数组
-      let members = [];
-      if (res.code === 200 && res.data) {
-        members = res.data;
-      } else if (Array.isArray(res)) {
-        members = res;
-      }
+      const members = res.code === 200 && res.data ? res.data : (Array.isArray(res) ? res : []);
 
       if (members.length > 0) {
         // 存储到全局，供页面使用
@@ -416,6 +454,262 @@ App({
     } catch (err) {
       console.error('[BLE] ❌ 预加载成员数据失败:', err);
     }
+  },
+
+  // =====================
+  // BLE 时间同步相关方法
+  // =====================
+
+  /**
+   * 创建 BLE 连接（Promise 封装）
+   */
+  createBLEConnection(deviceId) {
+    return new Promise((resolve, reject) => {
+      wx.createBLEConnection({
+        deviceId,
+        timeout: 10000,
+        success: resolve,
+        fail: reject
+      });
+    });
+  },
+
+  /**
+   * 获取 BLE 设备服务（Promise 封装）
+   */
+  getBLEDeviceServices(deviceId) {
+    return new Promise((resolve, reject) => {
+      wx.getBLEDeviceServices({
+        deviceId,
+        success: (res) => resolve(res.services),
+        fail: reject
+      });
+    });
+  },
+
+  /**
+   * 获取 BLE 特征值（Promise 封装）
+   */
+  getBLEDeviceCharacteristics(deviceId, serviceId) {
+    return new Promise((resolve, reject) => {
+      wx.getBLEDeviceCharacteristics({
+        deviceId,
+        serviceId,
+        success: (res) => resolve(res.characteristics),
+        fail: reject
+      });
+    });
+  },
+
+  /**
+   * 写入 BLE 特征值（Promise 封装）
+   */
+  writeBLECharacteristicValue(deviceId, serviceId, characteristicId, value) {
+    return new Promise((resolve, reject) => {
+      wx.writeBLECharacteristicValue({
+        deviceId,
+        serviceId,
+        characteristicId,
+        value,
+        success: resolve,
+        fail: reject
+      });
+    });
+  },
+
+  /**
+   * 关闭 BLE 连接（Promise 封装）
+   */
+  closeBLEConnection(deviceId) {
+    return new Promise((resolve, reject) => {
+      wx.closeBLEConnection({
+        deviceId,
+        success: resolve,
+        fail: reject
+      });
+    });
+  },
+
+  /**
+   * 构建时间同步数据（10字节）
+   * 格式：
+   * Byte 0-1: Year (Little Endian)
+   * Byte 2: Month (1-12)
+   * Byte 3: Day (1-31)
+   * Byte 4: Hour (0-23)
+   * Byte 5: Minute (0-59)
+   * Byte 6: Second (0-59)
+   * Byte 7: 0x03 (固定值)
+   * Byte 8: 0x00 (固定值)
+   * Byte 9: 0x00 (固定值)
+   *
+   * 注意：设备期望接收 UTC 时间，不是本地时间
+   */
+  buildTimeSyncData(date) {
+    // 使用 UTC 时间，因为设备广播和解析都使用 UTC
+    const year = date.getUTCFullYear();
+    const month = date.getUTCMonth() + 1;
+    const day = date.getUTCDate();
+    const hour = date.getUTCHours();
+    const minute = date.getUTCMinutes();
+    const second = date.getUTCSeconds();
+
+    const buffer = new ArrayBuffer(10);
+    const view = new DataView(buffer);
+
+    // Year (Little Endian)
+    view.setUint16(0, year, true);
+    // Month
+    view.setUint8(2, month);
+    // Day
+    view.setUint8(3, day);
+    // Hour
+    view.setUint8(4, hour);
+    // Minute
+    view.setUint8(5, minute);
+    // Second
+    view.setUint8(6, second);
+    // Fixed bytes
+    view.setUint8(7, 0x03);
+    view.setUint8(8, 0x00);
+    view.setUint8(9, 0x00);
+
+    return buffer;
+  },
+
+  /**
+   * 执行设备时间同步（核心逻辑）
+   * @param {string} deviceId - 设备ID
+   */
+  async executeTimeSync(deviceId) {
+    console.log('[BLE] 🕐 开始时间同步流程...');
+
+    try {
+      // 1. 创建 BLE 连接
+      await this.createBLEConnection(deviceId);
+      console.log('[BLE] ✅ BLE 连接成功');
+
+      // 2. 获取服务列表
+      const services = await this.getBLEDeviceServices(deviceId);
+      console.log('[BLE] 📦 发现服务数量:', services.length);
+
+      // 3. 查找 Body Composition Service (0x181b)
+      const bodyCompService = services.find(s => {
+        const uuid = s.uuid.replace(/-/g, '').toLowerCase();
+        return uuid.includes('181b');
+      });
+
+      if (!bodyCompService) {
+        throw new Error('未找到体成分服务 (0x181b)');
+      }
+
+      // 4. 获取特征值列表
+      const characteristics = await this.getBLEDeviceCharacteristics(
+        deviceId,
+        bodyCompService.uuid
+      );
+
+      // 5. 查找 Current Time 特征 (0x2a2b)
+      const currentTimeChar = characteristics.find(c => {
+        const uuid = c.uuid.replace(/-/g, '').toLowerCase();
+        return uuid.includes('2a2b');
+      });
+
+      if (!currentTimeChar) {
+        throw new Error('未找到 Current Time 特征 (0x2a2b)');
+      }
+
+      // 6. 构建并写入时间数据（10字节）
+      const timeData = this.buildTimeSyncData(new Date());
+      await this.writeBLECharacteristicValue(
+        deviceId,
+        bodyCompService.uuid,
+        currentTimeChar.uuid,
+        timeData
+      );
+      console.log('[BLE] ✅ 时间写入成功');
+
+      // 7. 断开连接（让设备重启以激活新时间）
+      await this.closeBLEConnection(deviceId);
+      console.log('[BLE] 🔌 已断开连接，等待设备重启...');
+
+      // 8. 等待设备重启完成（2秒）
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      console.log('[BLE] ✅ 时间同步完成！');
+
+    } catch (err) {
+      console.error('[BLE] ❌ 时间同步失败:', err.message);
+
+      // 确保关闭连接
+      try {
+        await this.closeBLEConnection(deviceId);
+      } catch (closeErr) {
+        console.warn('[BLE] ⚠️ 关闭连接失败:', closeErr.message);
+      }
+
+      wx.showToast({
+        title: '时间同步失败，请重试',
+        icon: 'none',
+        duration: 3000
+      });
+
+      throw err; // 重新抛出错误，让调用者处理
+    }
+  },
+
+  /**
+   * 异步触发时间同步（带全局防重机制）
+   * @param {string} deviceId - 设备ID
+   */
+  asyncTriggerTimeSync(deviceId) {
+    const now = Date.now();
+    const global = this.globalData;
+
+    // 全局防重检查：同一设备在5分钟内不重复触发
+    if (global.timeSyncInProgress) {
+      console.log('[BLE] ⏳ 时间同步已在进行中，跳过');
+      return;
+    }
+
+    if (global.lastTimeSyncDeviceId === deviceId &&
+        (now - global.lastTimeSyncTimestamp) < 5 * 60 * 1000) {
+      console.log('[BLE] ⏸️ 该设备最近已执行过时间同步，跳过');
+      return;
+    }
+
+    // 设置全局锁
+    global.timeSyncInProgress = true;
+    global.lastTimeSyncDeviceId = deviceId;
+    global.lastTimeSyncTimestamp = now;
+
+    console.log('[BLE] 🕐 异步触发时间同步...');
+
+    // 异步执行，不阻塞主线程
+    setTimeout(() => {
+      // 1. 先停止扫描
+      wx.stopBluetoothDevicesDiscovery({
+        success: () => console.log('[BLE] ⏸️ 已停止扫描，准备同步时间'),
+        fail: (err) => console.warn('[BLE] ⚠️ 停止扫描失败:', err)
+      });
+
+      // 2. 执行时间同步
+      this.executeTimeSync(deviceId)
+        .then(() => {
+          console.log('[BLE] ✅ 时间同步完成');
+        })
+        .catch((err) => {
+          console.error('[BLE] ❌ 时间同步失败:', err);
+        })
+        .finally(() => {
+          // 3. 无论成功失败，都恢复扫描并释放锁
+          if (this.globalData.bleAdapterInitialized) {
+            this.startContinuousScan();
+            console.log('[BLE] 📡 已恢复扫描');
+          }
+          global.timeSyncInProgress = false;
+        });
+    }, 100); // 延迟100ms执行，确保不阻塞当前扫描流程
   },
 
   /**
@@ -461,9 +755,8 @@ App({
       return;
     }
 
-    const pages = getCurrentPages();
-    const currentPage = pages[pages.length - 1];
-    if (currentPage && currentPage.route === 'pages/scale/scale') {
+    // 已在称重页则跳过
+    if (this.isCurrentPage('pages/scale/scale')) {
       console.log('[BLE] ⏸️ 已在称重页，跳过');
       return;
     }
@@ -476,17 +769,16 @@ App({
     wx.vibrateShort({ type: 'medium' });
     wx.showLoading({ title: '连接秤...', mask: true });
 
-    var self = this;
-    var releaseLock = function() {
-      setTimeout(function() {
-        self.globalData.scalePageNavigationInFlight = false;
+    const releaseLock = () => {
+      setTimeout(() => {
+        this.globalData.scalePageNavigationInFlight = false;
         wx.hideLoading();
       }, 1000);
     };
 
     wx.navigateTo({
       url: '/pages/scale/scale',
-      fail: function() {
+      fail: () => {
         wx.redirectTo({ url: '/pages/scale/scale' });
       },
       complete: releaseLock
