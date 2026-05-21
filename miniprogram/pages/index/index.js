@@ -31,6 +31,27 @@ Page({
     if (this.data.userInfo) {
       // 注册设备状态更新监听
       this.registerDeviceStatusListener();
+      
+      // 【新增】如果 dashboard 缓存已被清除（称重页保存后），重新加载设备数据
+      const app = getApp();
+      if (!app.globalData.cachedDashboardData && this.data.devicesLoaded) {
+        console.log('[首页] 🔄 检测到缓存已清除，重新加载设备数据');
+        this.loadUserDevices();
+      } else if (this.data.devicesLoaded && app.globalData.cachedDashboardData) {
+        // 【新增】检查缓存数据是否完整，如果不完整则强制刷新
+        const cachedData = app.globalData.cachedDashboardData;
+        const hasXiaomiConfig = cachedData.xiaomi_config || false;
+        const hasScaleStats = cachedData.scale_stats && typeof cachedData.scale_stats === 'object' && 'today_count' in cachedData.scale_stats;
+        
+        if (hasXiaomiConfig && !hasScaleStats) {
+          console.warn('[首页] ⚠️ 缓存数据不完整（缺少 scale_stats），强制刷新');
+          // 清除缓存
+          app.globalData.cachedDashboardData = null;
+          app.globalData.dashboardCacheTime = 0;
+          // 重新加载
+          this.loadUserDevices();
+        }
+      }
     }
   },
   
@@ -201,6 +222,8 @@ Page({
       const dashboardData = await app.fetchDashboardData(this.data.userInfo.user_id)
       
       console.log('[首页] 📦 获取到dashboard数据')
+      console.log('[首页] 🔍 xiaomi_config:', dashboardData.xiaomi_config)
+      console.log('[首页] 🔍 scale_stats:', dashboardData.scale_stats)
       const petDevices = []
       const healthDevices = []
       const userDevices = []
@@ -314,13 +337,16 @@ Page({
         }
         
         // 从 dashboardData 中获取体脂秤统计数据
-        const scaleStats = dashboardData.scale_stats || {}
+        const scaleStats = dashboardData.scale_stats
         console.log('[首页] 📊 体脂秤统计数据:', scaleStats)
         
-        if (scaleStats) {
+        // 【修复】只有当 scale_stats 存在且包含有效字段时才使用
+        if (scaleStats && typeof scaleStats === 'object' && 'today_count' in scaleStats) {
           scaleDevice.today_measurements = scaleStats.today_count || 0
-          scaleDevice.latest_body_fat = scaleStats.latest_body_fat || null
+          scaleDevice.latest_body_fat = scaleStats.latest_body_fat !== undefined ? scaleStats.latest_body_fat : null
           console.log('[首页] ✅ 体脂秤数据 - 今日测量:', scaleDevice.today_measurements, '体脂率:', scaleDevice.latest_body_fat)
+        } else {
+          console.warn('[首页] ⚠️ scale_stats 数据缺失或格式错误，使用默认值')
         }
         
         healthDevices.push(scaleDevice)

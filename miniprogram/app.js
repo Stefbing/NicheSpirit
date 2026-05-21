@@ -328,8 +328,7 @@ App({
       this.globalData.latestScaleData = {
         ...finalData,
         deviceId: device.deviceId,
-        RSSI: device.RSSI,
-        timestamp: parseTime
+        RSSI: device.RSSI
       };
 
       // 记录本次处理的数据

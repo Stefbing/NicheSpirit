@@ -1089,6 +1089,15 @@ Page({
           icon: 'success',
           duration: 1500
         });
+        
+        // 【关键】清除 dashboard 缓存，确保首页能看到最新数据
+        const app = getApp();
+        const userInfo = wx.getStorageSync('userInfo');
+        if (userInfo && userInfo.user_id) {
+          console.log('[Scale] 🗑️ 清除 dashboard 缓存');
+          app.globalData.cachedDashboardData = null;
+          app.globalData.dashboardCacheTime = 0;
+        }
       }
     } catch (err) {
       console.error('[Scale] ❌ 自动保存失败:', err);
