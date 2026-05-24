@@ -1,0 +1,55 @@
+<view class="page">
+  <view class="card">
+    <view class="title">冷门器灵</view>
+    <view class="subtitle" wx:if="{{!isSilentFailed}}">正在验证身份…</view>
+    <view class="subtitle" wx:else>请使用手机号+密码登录绑定</view>
+
+    <!-- 静默登录等待状态 -->
+    <block wx:if="{{!isSilentFailed}}">
+      <view class="btn-primary" disabled>
+        <view class="loading-spinner"></view>
+        微信授权中…
+      </view>
+    </block>
+
+    <!-- 账密绑定表单 -->
+    <block wx:else>
+      <view class="input-group">
+        <label>手机号</label>
+        <input
+          type="number"
+          maxlength="11"
+          placeholder="请输入手机号"
+          value="{{account}}"
+          bindinput="onAccountInput"
+        />
+      </view>
+
+      <view class="input-group">
+        <label>密码</label>
+        <input
+          type="password"
+          maxlength="32"
+          placeholder="请输入密码（至少6位）"
+          value="{{password}}"
+          bindinput="onPasswordInput"
+        />
+      </view>
+
+      <button
+        class="btn-primary"
+        bindtap="handleBindLogin"
+        disabled="{{loading || !account || !password || password.length < 6}}"
+      >
+        <view class="loading-spinner" wx:if="{{loading}}"></view>
+        {{loading ? '绑定中…' : '登录并绑定微信'}}
+      </button>
+
+      <view class="error-msg">{{errorMsg}}</view>
+
+      <view class="divider">注册即绑定</view>
+    </block>
+  </view>
+
+  <view class="footer">首次登录将自动注册并绑定微信</view>
+</view>

@@ -11,6 +11,10 @@ class User(SQLModel, table=True):
     
     id: Optional[int] = Field(default=None, primary_key=True)  # 自增主键
     phone_number: str = Field(max_length=20, unique=True, index=True)  # 手机号（唯一标识）
+    password_hash: Optional[str] = Field(default=None, max_length=256)  # 密码哈希（bcrypt），用于账密登录
+    openid: Optional[str] = Field(default=None, max_length=64, unique=True, index=True)  # 微信 OpenID
+    unionid: Optional[str] = Field(default=None, max_length=64)  # 微信 UnionID
+    session_key: Optional[str] = Field(default=None, max_length=64)  # 微信 session_key
     nickname: Optional[str] = Field(default=None, max_length=100)  # 昵称
     gender: str = Field(default="male", max_length=10)  # male/female
     age: int = Field(default=25)

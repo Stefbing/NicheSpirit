@@ -1,6 +1,6 @@
 """Smart Home Controller API - Main Application"""
-import os, uvicorn, asyncio, time, logging
-from datetime import datetime
+import os, uvicorn, asyncio, time, logging, hashlib, hmac, json
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from typing import Optional, List
 
@@ -18,7 +18,7 @@ from .services.petkit_service import PetKitService
 from .services.cloudpets_service import cloudpets_service, FeedingPlan as CloudPetsPlan
 from .services.xiaomi_service import xiaomi_service
 from .models.models import User, WeightRecord, SystemConfig, FamilyMember
-from .models.db import get_session, init_db
+from .models.db import get_session, init_db, engine
 from .utils.cache_manager import cache_manager
 from .utils.config_encryptor import ConfigEncryptor
 from .scheduler.task_scheduler import scheduler
@@ -1342,6 +1342,238 @@ async def reinit_services():
     except Exception as e:
         logger.error(f"Failed to reinitialize services: {e}")
         raise HTTPException(status_code=500, detail=f"重新初始化失败: {str(e)}")
+
+# ============================================================================
+# WeChat 小程序登录认证（OpenID 绑定 + 静默免密直登）
+# ============================================================================
+
+# --- 环境变量配置 ---
+JWT_SECRET = os.getenv("JWT_SECRET", "niche-spirit-jwt-secret-2024")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "720"))  # 默认 30 天
+
+WECHAT_APPID = os.getenv("WECHAT_APPID", "")
+WECHAT_SECRET = os.getenv("WECHAT_SECRET", "")
+
+
+def create_jwt_token(user_id: int, phone_number: str, openid: str = "") -> str:
+    """生成 JWT Token"""
+    import jwt as pyjwt
+    payload = {
+        "user_id": user_id,
+        "phone_number": phone_number,
+        "openid": openid,
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS),
+    }
+    return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def hash_password(password: str) -> str:
+    """使用 bcrypt 哈希密码"""
+    import bcrypt
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(plain_password: str, hashed: str) -> bool:
+    """验证密码"""
+    import bcrypt
+    return bcrypt.checkpw(plain_password.encode("utf-8"), hashed.encode("utf-8"))
+
+
+async def wx_code2session(code: str) -> dict:
+    """通过微信 code 换取 openid 和 session_key"""
+    if not WECHAT_APPID or not WECHAT_SECRET:
+        logger.error("WECHAT_APPID 或 WECHAT_SECRET 未配置")
+        raise HTTPException(status_code=500, detail="微信服务配置缺失")
+
+    import httpx
+    url = "https://api.weixin.qq.com/sns/jscode2session"
+    params = {
+        "appid": WECHAT_APPID,
+        "secret": WECHAT_SECRET,
+        "js_code": code,
+        "grant_type": "authorization_code",
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(url, params=params)
+        data = resp.json()
+
+    if "errcode" in data and data["errcode"] != 0:
+        logger.error(f"微信 code2session 失败: {data}")
+        raise HTTPException(status_code=400, detail=f"微信登录失败: {data.get('errmsg', '未知错误')}")
+
+    return {
+        "openid": data.get("openid", ""),
+        "session_key": data.get("session_key", ""),
+        "unionid": data.get("unionid"),
+    }
+
+
+
+# --- 接口 A：首次账密登录 + 绑定 OpenID ---
+class BindLoginRequest(BaseModel):
+    account: str       # 手机号
+    password: str      # 明文密码
+    code: str          # wx.login() 返回的临时 code
+
+class BindLoginResponse(BaseModel):
+    token: str
+    user_id: int
+    phone_number: str
+    openid: str
+    nickname: Optional[str] = None
+    is_new_user: bool = False
+
+@app.post("/api/auth/bind", response_model=BindLoginResponse)
+async def auth_bind_login(request: BindLoginRequest, session: Session = Depends(get_session)):
+    """首次账密登录激活绑定"""
+    account = request.account.strip()
+    password = request.password.strip()
+    code = request.code.strip()
+
+    # --- 1. 参数校验 ---
+    if not account or len(account) != 11 or not account.isdigit():
+        raise HTTPException(status_code=400, detail="请输入正确的11位手机号")
+    if not password or len(password) < 6:
+        raise HTTPException(status_code=400, detail="密码长度不能少于6位")
+    if not code:
+        raise HTTPException(status_code=400, detail="缺少微信登录凭证")
+
+    # --- 2. 向微信换取 openid ---
+    wx_data = await wx_code2session(code)
+    openid = wx_data["openid"]
+    new_session_key = wx_data["session_key"]
+    unionid = wx_data.get("unionid")
+
+    if not openid:
+        raise HTTPException(status_code=400, detail="获取微信 OpenID 失败")
+
+    # --- 3. 查找或创建用户 ---
+    user = session.exec(select(User).where(User.phone_number == account)).first()
+    is_new_user = False
+
+    if user:
+        # 已有用户 → 校验密码
+        if not user.password_hash:
+            # 用户之前可能用手机号免密登录过，尚无密码 → 直接设置密码
+            user.password_hash = hash_password(password)
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+            logger.info(f"用户 {account} 首次设置密码")
+        elif not verify_password(password, user.password_hash):
+            raise HTTPException(status_code=401, detail="手机号或密码错误")
+    else:
+        # 新用户注册
+        is_new_user = True
+        user = User(
+            phone_number=account,
+            password_hash=hash_password(password),
+            nickname=f"用户{account[-4:]}",
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        logger.info(f"新用户注册: {account}, ID: {user.id}")
+
+    # --- 4. 建立 / 更新 OpenID 绑定（直接写 user 表）---
+    # 若此 openid 此前已绑定到其他用户，先清空旧绑定（一对一约束）
+    old_user = session.exec(
+        select(User).where(User.openid == openid, User.id != user.id)
+    ).first()
+    if old_user:
+        old_user.openid = None
+        old_user.unionid = None
+        old_user.session_key = None
+        old_user.updated_at = int(time.time() * 1000)
+        session.add(old_user)
+        logger.info(f"openid 换绑：旧用户 {old_user.id} 的绑定已清除")
+
+    # 对当前用户落库 openid
+    user.openid = openid
+    user.session_key = new_session_key
+    if unionid:
+        user.unionid = unionid
+    user.updated_at = int(time.time() * 1000)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    logger.info(f"OpenID 绑定完成: user_id={user.id}, openid={openid[-8:]}...")
+
+    # --- 5. 签发 JWT ---
+    token = create_jwt_token(user.id, user.phone_number, openid)
+
+    return BindLoginResponse(
+        token=token,
+        user_id=user.id,
+        phone_number=user.phone_number,
+        openid=openid,
+        nickname=user.nickname,
+        is_new_user=is_new_user,
+    )
+
+
+# --- 接口 B：静默免密登录 ---
+class SilentLoginRequest(BaseModel):
+    code: str  # wx.login() 返回的临时 code
+
+class SilentLoginResponse(BaseModel):
+    token: str
+    user_id: int
+    phone_number: str
+    openid: str
+    nickname: Optional[str] = None
+
+@app.post("/api/auth/silent-login", response_model=SilentLoginResponse)
+async def auth_silent_login(request: SilentLoginRequest, session: Session = Depends(get_session)):
+    """静默免密登录（仅依赖 wx.login code）"""
+    code = request.code.strip()
+
+    if not code:
+        raise HTTPException(status_code=400, detail="缺少微信登录凭证")
+
+    # --- 1. 向微信换取 openid ---
+    wx_data = await wx_code2session(code)
+    openid = wx_data["openid"]
+    new_session_key = wx_data["session_key"]
+    unionid = wx_data.get("unionid")
+
+    if not openid:
+        raise HTTPException(status_code=400, detail="获取微信 OpenID 失败")
+
+    # --- 2. 按 openid 直接查 user 表 ---
+    user = session.exec(select(User).where(User.openid == openid)).first()
+
+    if not user:
+        # 未绑定 → 返回特定错误码，引导前端走账密登录
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "UNBOUND",
+                "message": "该微信尚未绑定账号，请先使用手机号+密码登录完成绑定",
+            },
+        )
+
+    # --- 3. 更新 session_key ---
+    user.session_key = new_session_key
+    if unionid:
+        user.unionid = unionid
+    user.updated_at = int(time.time() * 1000)
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    # --- 4. 签发 JWT ---
+    token = create_jwt_token(user.id, user.phone_number, openid)
+
+    return SilentLoginResponse(
+        token=token,
+        user_id=user.id,
+        phone_number=user.phone_number,
+        openid=openid,
+        nickname=user.nickname,
+    )
 
 # --- System Config APIs ---
 class ConfigItem(BaseModel):

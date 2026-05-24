@@ -93,9 +93,12 @@ function callContainer(options) {
  * 本地调试请求
  */
 function localRequest(path, method, data, header, timeout) {
+  const url = `${CONFIG.localBaseUrl}${path}`;
+  console.log(`[Request] → ${method} ${url}`);
+
   return new Promise((resolve, reject) => {
     wx.request({
-      url: `${CONFIG.localBaseUrl}${path}`,
+      url: url,
       method: method,
       timeout: timeout,
       header: {
@@ -104,6 +107,7 @@ function localRequest(path, method, data, header, timeout) {
       },
       data: data,
       success: (res) => {
+        console.log(`[Request] ← ${res.statusCode} ${method} ${path}`);
         if (res.statusCode >= 200 && res.statusCode < 300) {
           resolve(res.data);
         } else {
@@ -111,7 +115,7 @@ function localRequest(path, method, data, header, timeout) {
         }
       },
       fail: (err) => {
-        console.error('[Request] 本地请求异常:', err);
+        console.error(`[Request] ✗ 本地请求失败 [${url}]:`, err);
         reject(err);
       }
     });

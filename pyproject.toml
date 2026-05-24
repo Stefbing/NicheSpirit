@@ -20,7 +20,10 @@ dependencies = [
     "pycryptodome",
     "pillow",
     "charset-normalizer",
-    "colorama"
+    "colorama",
+    "pyjwt>=2.8.0",
+    "bcrypt>=4.0.0",
+    "websockets>=13,<14",  # 13.x 兼容 uvicorn 的 legacy.handshake
 ]
 
 [build-system]

@@ -9,6 +9,10 @@
 CREATE TABLE IF NOT EXISTS user (
     id INT AUTO_INCREMENT PRIMARY KEY,                  -- 自增主键
     phone_number VARCHAR(20) UNIQUE NOT NULL,          -- 手机号（唯一标识）
+    password_hash VARCHAR(256) DEFAULT NULL,            -- 密码哈希（bcrypt），用于账密登录；NULL 表示尚未设置密码
+    openid VARCHAR(64) DEFAULT NULL,                    -- 微信 OpenID，NULL 表示尚未绑定微信
+    unionid VARCHAR(64) DEFAULT NULL,                   -- 微信 UnionID（同一开放平台下唯一）
+    session_key VARCHAR(64) DEFAULT NULL,               -- 微信 session_key（用于数据解密等场景）
     nickname VARCHAR(100),                              -- 昵称
     gender VARCHAR(10) DEFAULT 'male',                  -- 性别：male/female
     age INT DEFAULT 25,                                 -- 年龄
@@ -16,7 +20,9 @@ CREATE TABLE IF NOT EXISTS user (
     created_at BIGINT NOT NULL,                         -- 创建时间戳（毫秒）
     updated_at BIGINT NOT NULL,                         -- 更新时间戳（毫秒）
     
-    INDEX idx_phone (phone_number)                      -- 手机号索引：加速登录查询
+    UNIQUE KEY uk_openid (openid),                      -- 唯一约束：一个微信只能绑定一个用户
+    INDEX idx_phone (phone_number),                     -- 手机号索引：加速登录查询
+    INDEX idx_openid (openid)                           -- OpenID 索引：加速静默登录查询
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================================

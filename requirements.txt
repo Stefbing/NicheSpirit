@@ -1,6 +1,6 @@
 # FastAPI 框架及核心组件
 fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
+uvicorn>=0.27.0
 pydantic>=2.5.0
 
 # 数据库相关
@@ -19,6 +19,8 @@ pypetkitapi>=1.7.0
 # 加密和安全
 cryptography>=42.0.0
 pycryptodome>=3.19.0
+PyJWT>=2.8.0
+bcrypt>=4.0.0
 
 # 图像处理
 Pillow>=10.0.0
