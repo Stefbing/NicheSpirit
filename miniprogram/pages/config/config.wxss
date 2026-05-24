@@ -17,6 +17,7 @@
   flex-direction: column;
   align-items: center;
   gap: 12rpx;
+  animation: ani-fadeInScale 0.4s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 .hero-icon {
@@ -39,6 +40,7 @@
 /* 配置区域 */
 .config-section {
   margin: 24rpx 32rpx;
+  animation: ani-fadeInUp 0.35s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 .section-header {

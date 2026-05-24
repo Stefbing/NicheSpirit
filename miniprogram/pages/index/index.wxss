@@ -277,6 +277,12 @@
   display: flex;
   align-items: center;
   padding: 0 40rpx 24rpx;
+  animation: ani-fadeInUp 0.3s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* 设备卡片分步入场 */
+.device-card {
+  animation: ani-fadeInUp 0.35s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 .section-icon {
@@ -527,18 +533,12 @@
   padding: 40rpx 32rpx;
   box-shadow: 0 20rpx 60rpx rgba(0, 0, 0, 0.2),
               0 0 0 1rpx rgba(255, 255, 255, 0.5) inset;
-  animation: modalSlideUp 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  animation: ani-modalUp 0.3s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
-@keyframes modalSlideUp {
-  from {
-    opacity: 0;
-    transform: translateY(60rpx) scale(0.95);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
+/* 遮罩层淡入 */
+.modal-mask {
+  animation: ani-maskIn 0.2s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 .modal-title {

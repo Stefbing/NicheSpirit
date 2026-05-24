@@ -1,0 +1,101 @@
+/**
+ * ========================================
+ * 全局动画过渡定义
+ * 统一时长与缓动函数
+ * ========================================
+ */
+
+/* ---------- 过渡变量 ---------- */
+/* 使用方式：
+   transition: all 0.3s var(--ease-out);
+   由于微信不支持 CSS 变量，各页面直接引用 cubic-bezier 值 */
+
+/* 统一缓动：Material Design ease-out */
+/* cubic-bezier(0.4, 0, 0.2, 1) */
+
+/* 统一时长：
+   fast: 0.2s
+   normal: 0.3s
+   slow: 0.5s */
+
+/* ---------- 淡入系 ---------- */
+@keyframes ani-fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes ani-fadeInUp {
+  from { opacity: 0; transform: translateY(24rpx); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes ani-fadeInDown {
+  from { opacity: 0; transform: translateY(-24rpx); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes ani-fadeInScale {
+  from { opacity: 0; transform: scale(0.92); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* ---------- 滑入系 ---------- */
+@keyframes ani-slideInRight {
+  from { opacity: 0; transform: translateX(40rpx); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes ani-slideInLeft {
+  from { opacity: 0; transform: translateX(-40rpx); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* ---------- 弹窗 ---------- */
+@keyframes ani-modalUp {
+  from {
+    opacity: 0;
+    transform: translateY(60rpx) scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes ani-maskIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ---------- 骨架屏 ---------- */
+@keyframes ani-shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+/* ---------- 呼吸脉冲 ---------- */
+@keyframes ani-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.7; transform: scale(1.05); }
+}
+
+/* ---------- 旋转 ---------- */
+@keyframes ani-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---------- 步进延迟工具类 ---------- */
+/* 使用：在父容器添加 .stagger-children ，子项延迟递增 */
+.stagger-1  { animation-delay: 0.05s; }
+.stagger-2  { animation-delay: 0.1s; }
+.stagger-3  { animation-delay: 0.15s; }
+.stagger-4  { animation-delay: 0.2s; }
+.stagger-5  { animation-delay: 0.25s; }
+.stagger-6  { animation-delay: 0.3s; }
+.stagger-7  { animation-delay: 0.35s; }
+.stagger-8  { animation-delay: 0.4s; }
+.stagger-9  { animation-delay: 0.45s; }
+.stagger-10 { animation-delay: 0.5s; }
+
+/* ---------- 速度类 ---------- */
+.duration-fast   { animation-duration: 0.2s; }
+.duration-normal { animation-duration: 0.3s; }
+.duration-slow   { animation-duration: 0.5s; }
+
+/* ---------- 填充模式 ---------- */
+.fill-both { animation-fill-mode: both; }

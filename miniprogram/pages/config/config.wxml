@@ -7,7 +7,7 @@
   </view>
 
   <!-- CloudPets 配置 -->
-  <view class="config-section">
+  <view class="config-section stagger-1">
     <view class="section-header">
       <text class="section-icon">🍖</text>
       <text class="section-name">CloudPets 喂食器</text>
@@ -41,7 +41,7 @@
   </view>
 
   <!-- PetKit 配置 -->
-  <view class="config-section">
+  <view class="config-section stagger-2">
     <view class="section-header">
       <text class="section-icon">🚽</text>
       <text class="section-name">PetKit 宠物设备</text>
@@ -75,7 +75,7 @@
   </view>
 
   <!-- Xiaomi 配置 -->
-  <view class="config-section">
+  <view class="config-section stagger-3">
     <view class="section-header">
       <text class="section-icon">⚖️</text>
       <text class="section-name">小米体脂秤</text>

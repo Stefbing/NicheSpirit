@@ -65,7 +65,7 @@
     <scroll-view wx:else class="device-scroll" scroll-y enable-flex>
       <!-- 宠物生活 -->
       <view wx:if="{{petDevices.length > 0}}" class="device-section">
-        <view class="section-header">
+        <view class="section-header stagger-1">
           <text class="section-icon">🐾</text>
           <text class="section-name">宠物生活</text>
         </view>
@@ -75,7 +75,7 @@
             <!-- 喂食机卡片 -->
             <navigator wx:if="{{item.device_type === 'feeder'}}"
                        url="/pages/feeder/feeder"
-                       class="device-card feeder-card"
+                       class="device-card feeder-card stagger-{{index+1}}"
                        bindlongpress="onLongPressDevice"
                        data-device-key="{{item.device_key}}"
                        data-device-name="{{item.display_name || item.device_name || '喂食机'}}">
@@ -113,7 +113,7 @@
             <!-- 猫厕所卡片 -->
             <navigator wx:if="{{item.device_type === 'litterbox'}}"
                        url="/pages/litterbox/litterbox"
-                       class="device-card litterbox-card"
+                       class="device-card litterbox-card stagger-{{index+1}}"
                        bindlongpress="onLongPressDevice"
                        data-device-key="{{item.device_key}}"
                        data-device-name="{{item.display_name || item.device_name || '猫厕所'}}">
@@ -153,7 +153,7 @@
 
       <!-- 健康与体质 -->
       <view wx:if="{{healthDevices.length > 0}}" class="device-section">
-        <view class="section-header">
+        <view class="section-header stagger-1">
           <text class="section-icon">⚖️</text>
           <text class="section-name">健康与体质</text>
         </view>
@@ -163,7 +163,7 @@
             <!-- 体脂秤卡片 -->
             <navigator wx:if="{{item.device_type === 'scale'}}"
                        url="/pages/scale/scale"
-                       class="device-card scale-card"
+                       class="device-card scale-card stagger-{{index+1}}"
                        bindlongpress="onLongPressDevice"
                        data-device-key="{{item.device_key}}"
                        data-device-name="{{item.display_name || 'MIBFS'}}">

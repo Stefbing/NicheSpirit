@@ -26,6 +26,9 @@ Page({
   },
   
   onShow: function() {
+    // 关闭前页跳转时可能留下的 loading 遮罩（如登录页 → 首页）
+    wx.hideLoading();
+    
     this.updateGreeting()
     // onShow不再加载设备数据，只处理设备状态监听
     if (this.data.userInfo) {
@@ -646,14 +649,23 @@ Page({
             app.globalData.scaleListeners = [];
           }
           
+          // 保存退出的手机号（供登录页本账号密码模式使用）
+          const userInfo = this.data.userInfo || wx.getStorageSync('userInfo');
+          if (userInfo && userInfo.phone_number) {
+            wx.setStorageSync('lastLogoutPhone', userInfo.phone_number);
+          }
+          
           wx.removeStorageSync('userInfo')
+          wx.removeStorageSync('token')
           this.setData({ 
             userInfo: null,
             userDevices: [],
             petDevices: [],
             healthDevices: []
           })
-          wx.showToast({ title: '已退出', icon: 'success' })
+          
+          // 导航到登录页（携带 fromLogout 参数）
+          wx.reLaunch({ url: '/pages/login/login?fromLogout=1' })
         }
       }
     })

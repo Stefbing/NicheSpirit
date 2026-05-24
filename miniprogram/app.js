@@ -68,10 +68,16 @@ App({
   /**
    * 检查登录状态 + 自动静默免密登录
    * 登录成功后初始化蓝牙等后续流程
+   *
+   * 逻辑：
+   * 1. 已有 token → 直接初始化蓝牙
+   * 2. 无 token 但 preventSilentLogin=true → 跳登录页并进入"本账号密码登录"模式
+   * 3. 无 token 且未禁止静默 → 尝试 openid 静默登录
    */
   async checkAndAutoLogin() {
     const userInfo = wx.getStorageSync('userInfo');
     const token = wx.getStorageSync('token');
+    const preventSilentLogin = wx.getStorageSync('preventSilentLogin');
 
     if (userInfo && userInfo.user_id && token) {
       // 已有登录态 → 直接初始化蓝牙
@@ -79,6 +85,13 @@ App({
       setTimeout(() => {
         this.checkAndInitBluetooth(userInfo.user_id);
       }, 500);
+      return;
+    }
+
+    // 检测 preventSilentLogin 标志 → 跳过静默，直接进入本账号密码登录模式
+    if (preventSilentLogin) {
+      console.log('[App] 已禁止静默登录，跳转至本账号密码登录');
+      wx.reLaunch({ url: '/pages/login/login?mode=own_password' });
       return;
     }
 
