@@ -303,6 +303,11 @@ App({
     // 清除旧的扫描数据，防止误触发跳转
     this.globalData.latestScaleData = null;
 
+    if (this.globalData.bleAdapterInitialized) {
+      console.log('[BLE] ✅ 蓝牙适配器已初始化，跳过');
+      return;
+    }
+
     wx.openBluetoothAdapter({
       success: () => {
         console.log('[BLE] ✅ 蓝牙适配器初始化成功');
@@ -323,6 +328,14 @@ App({
         this.startContinuousScan();
       },
       fail: (err) => {
+        const errMsg = (err && err.errMsg) || '';
+        // already opened 视为成功（竞态条件导致）
+        if (errMsg.indexOf('already opened') !== -1) {
+          console.log('[BLE] ✅ 蓝牙适配器已就绪');
+          this.globalData.bleAdapterInitialized = true;
+          this.startContinuousScan();
+          return;
+        }
         console.error('[BLE] ❌ 蓝牙初始化失败:', err);
         this.globalData.bleAdapterInitialized = false;
       }

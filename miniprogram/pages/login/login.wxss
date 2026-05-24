@@ -118,6 +118,15 @@
   to { transform: rotate(360deg); }
 }
 
+/* ====== 自动填充提示 ====== */
+.auto-fill-tip {
+  display: block;
+  font-size: 20rpx;
+  color: #999;
+  margin-top: 6rpx;
+  padding-left: 4rpx;
+}
+
 /* ====== 错误信息 ====== */
 .error-msg {
   font-size: 24rpx;

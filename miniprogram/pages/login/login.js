@@ -1,6 +1,16 @@
 const cloudRequest = require('../../utils/cloud_request.js');
 
 /**
+ * 手机号脱敏：保留前3后4，中间4位变星号
+ * @param {string} phone - 11位手机号
+ * @returns {string} 脱敏后字符串
+ */
+function maskPhone(phone) {
+  if (!phone || phone.length < 7) return phone || '';
+  return phone.slice(0, 3) + '****' + phone.slice(-4);
+}
+
+/**
  * 登录模式枚举
  * loading      - 静默登录中（显示加载）
  * select       - 登录方式选择（显示两个按钮）
@@ -20,7 +30,9 @@ Page({
     loginMode: MODE.LOADING,
 
     // 本账号密码登录
-    ownAccount: '',
+    ownAccount: '',          // 原始手机号（用于提交）
+    ownAccountDisplay: '',   // 界面显示值（自动填充时脱敏）
+    isPhoneAutoFilled: false,// 是否系统自动填充
     ownPassword: '',
 
     // 其他手机号绑定登录
@@ -33,6 +45,7 @@ Page({
 
     // 上次退出的手机号
     lastLogoutPhone: '',
+    lastLogoutPhoneDisplay: '',
 
     // 是否允许下拉触发静默登录（仅 select 模式且有权限时）
     canPullDownSilent: false,
@@ -125,6 +138,7 @@ Page({
       loginMode: MODE.SELECT,
       errorMsg: msg || '',
       lastLogoutPhone: phone,
+      lastLogoutPhoneDisplay: maskPhone(phone),
       ownAccount: phone,
       // 未禁止静默登录时才显示下拉/按钮入口
       canPullDownSilent: !preventSilent,
@@ -133,18 +147,24 @@ Page({
 
   /**
    * 选择：本账号密码登录
+   * 传递原始手机号（若有），由 startOwnPasswordMode 决定是否脱敏
    */
   onSelectOwnPassword() {
-    this.startOwnPasswordMode(this.data.ownAccount || this.data.lastLogoutPhone);
+    const phone = this.data.ownAccount || this.data.lastLogoutPhone;
+    this.startOwnPasswordMode(phone);
   },
 
   /**
    * 进入本账号密码登录模式
+   * @param {string} phone - 手机号（自动填充时传入原始号码，手动进入时传空）
    */
   startOwnPasswordMode(phone) {
+    const isAuto = !!phone && phone.length >= 7;
     this.setData({
       loginMode: MODE.OWN_PASSWORD,
       ownAccount: phone,
+      ownAccountDisplay: isAuto ? maskPhone(phone) : phone,
+      isPhoneAutoFilled: isAuto,
       ownPassword: '',
       loading: false,
       errorMsg: '',
@@ -169,9 +189,11 @@ Page({
   },
 
   /**
-   * 返回选择页（用户主动操作 → 强制展示，绕过 preventSilentLogin 拦截）
+   * 返回选择页（用户主动操作 → 强制展示 + 清除 preventSilentLogin，
+   * 允许后续下拉静默登录）
    */
   onBackToSelect() {
+    wx.setStorageSync('preventSilentLogin', false);
     this.showLoginSelect('', '', true);
   },
 
@@ -348,7 +370,32 @@ Page({
 
   // ==================== 输入事件 ====================
 
-  onOwnAccountInput(e) { this.setData({ ownAccount: e.detail.value }); },
+  /**
+   * 本账号输入框获得焦点
+   * 自动填充态 → 清除脱敏值，切换为手动输入
+   */
+  onOwnAccountFocus() {
+    if (this.data.isPhoneAutoFilled) {
+      this.setData({
+        ownAccount: '',
+        ownAccountDisplay: '',
+        isPhoneAutoFilled: false,
+      });
+    }
+  },
+
+  /**
+   * 本账号输入
+   * 自动填充清除后进入手动输入态，正常显示明文
+   */
+  onOwnAccountInput(e) {
+    const val = e.detail.value;
+    this.setData({
+      ownAccount: val,
+      ownAccountDisplay: val,
+    });
+  },
+
   onOwnPasswordInput(e) { this.setData({ ownPassword: e.detail.value }); },
   onAccountInput(e) { this.setData({ account: e.detail.value }); },
   onPasswordInput(e) { this.setData({ password: e.detail.value }); },

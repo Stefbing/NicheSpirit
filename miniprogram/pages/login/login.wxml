@@ -26,8 +26,8 @@
           <view class="select-icon">🔐</view>
           <view class="select-info">
             <view class="select-title">本账号密码登录</view>
-            <view class="select-desc" wx:if="{{lastLogoutPhone}}">
-              上次账号：{{lastLogoutPhone}}
+            <view class="select-desc" wx:if="{{lastLogoutPhoneDisplay || lastLogoutPhone}}">
+              上次账号：{{lastLogoutPhoneDisplay || lastLogoutPhone}}
             </view>
             <view class="select-desc" wx:else>使用上次退出的账号密码登录</view>
           </view>
@@ -63,12 +63,14 @@
         <view class="input-group">
           <label>手机号</label>
           <input
-            type="number"
+            type="text"
             maxlength="11"
             placeholder="请输入手机号"
-            value="{{ownAccount}}"
+            value="{{ownAccountDisplay}}"
+            bindfocus="onOwnAccountFocus"
             bindinput="onOwnAccountInput"
           />
+          <text class="auto-fill-tip" wx:if="{{isPhoneAutoFilled}}">点击输入框可修改手机号</text>
         </view>
 
         <view class="input-group">

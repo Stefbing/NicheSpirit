@@ -415,7 +415,7 @@ Page({
       devicePassword: ''
     })
   },
-  
+
   // 账号输入
   onAccountInput(e) {
     this.setData({ deviceAccount: e.detail.value })
