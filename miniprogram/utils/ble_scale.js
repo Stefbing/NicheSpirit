@@ -112,5 +112,44 @@ function parseFull(data) {
 }
 
 module.exports = {
-    parse
+    parse,
+    // BLE 操作 Promise 封装（供 app.js/scale.js 复用）
+    BLEBridge: {
+        createConnection(deviceId, timeout = 10000) {
+            return new Promise((resolve, reject) => {
+                wx.createBLEConnection({ deviceId, timeout, success: resolve, fail: reject });
+            });
+        },
+        getServices(deviceId) {
+            return new Promise((resolve, reject) => {
+                wx.getBLEDeviceServices({
+                    deviceId,
+                    success: (res) => resolve(res.services),
+                    fail: reject
+                });
+            });
+        },
+        getCharacteristics(deviceId, serviceId) {
+            return new Promise((resolve, reject) => {
+                wx.getBLEDeviceCharacteristics({
+                    deviceId, serviceId,
+                    success: (res) => resolve(res.characteristics),
+                    fail: reject
+                });
+            });
+        },
+        writeValue(deviceId, serviceId, characteristicId, value) {
+            return new Promise((resolve, reject) => {
+                wx.writeBLECharacteristicValue({
+                    deviceId, serviceId, characteristicId, value,
+                    success: resolve, fail: reject
+                });
+            });
+        },
+        closeConnection(deviceId) {
+            return new Promise((resolve, reject) => {
+                wx.closeBLEConnection({ deviceId, success: resolve, fail: reject });
+            });
+        }
+    }
 };

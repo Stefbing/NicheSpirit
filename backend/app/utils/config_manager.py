@@ -22,7 +22,8 @@ def _get_executor():
     """获取或创建线程池执行器"""
     global _executor
     if _executor is None:
-        _executor = asyncio.get_event_loop().run_in_executor
+        from concurrent.futures import ThreadPoolExecutor
+        _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="db-worker")
     return _executor
 
 

@@ -85,11 +85,13 @@ Page({
     this.checkCurrentDeviceStatus();
     
     // 设置定时器定期检查设备状态（每5秒）
-    if (!this.deviceStatusTimer) {
-      this.deviceStatusTimer = setInterval(() => {
-        this.checkCurrentDeviceStatus();
-      }, 5000);
+    // 先清除旧定时器，避免重复创建
+    if (this.deviceStatusTimer) {
+      clearInterval(this.deviceStatusTimer);
     }
+    this.deviceStatusTimer = setInterval(() => {
+      this.checkCurrentDeviceStatus();
+    }, 5000);
   },
   
   /**
@@ -627,9 +629,21 @@ Page({
           
           // 停止蓝牙定时扫描
           const app = getApp();
-          if (app && app.stopPeriodicScan) {
-            console.log('[首页] 退出登录，停止蓝牙定时扫描');
-            app.stopPeriodicScan();
+          if (app) {
+            // 清除 Dashboard 缓存（防止下次登录显示旧数据）
+            if (app.clearDashboardCache) {
+              app.clearDashboardCache();
+            }
+            // 停止蓝牙扫描
+            if (app.stopPeriodicScan) {
+              console.log('[首页] 退出登录，停止蓝牙定时扫描');
+              app.stopPeriodicScan();
+            }
+            // 重置蓝牙状态
+            app.globalData.bleAdapterInitialized = false;
+            app.globalData.bluetoothInitializing = false;
+            app.globalData.latestScaleData = null;
+            app.globalData.scaleListeners = [];
           }
           
           wx.removeStorageSync('userInfo')

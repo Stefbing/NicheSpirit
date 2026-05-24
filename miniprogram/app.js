@@ -71,11 +71,25 @@ App({
   },
 
   /**
-   * 获取Dashboard数据（带防重复请求机制）
+   * 清除 Dashboard 缓存（登出/切换用户时调用）
+   */
+  clearDashboardCache() {
+    this.globalData.cachedDashboardData = null;
+    this.globalData.dashboardCacheTime = 0;
+    this.globalData.dashboardFetching = false;
+    this.globalData.dashboardFetchPromise = null;
+    this.globalData.xiaomiConfigChecked = false;
+    this.globalData.hasXiaomiConfig = false;
+    console.log('[App] 🧹 Dashboard 缓存已清除');
+  },
+
+  /**
+   * 获取Dashboard数据（带防重复请求 + 超时保护）
    * @param {number} userId - 用户ID
+   * @param {number} timeout - 请求超时时间（默认 15s）
    * @returns {Promise} Dashboard数据
    */
-  async fetchDashboardData(userId) {
+  async fetchDashboardData(userId, timeout = 15000) {
     // 如果有缓存且未过期，直接返回
     const now = Date.now();
     if (this.globalData.cachedDashboardData && (now - this.globalData.dashboardCacheTime) < 30000) {
@@ -92,12 +106,21 @@ App({
     // 设置请求锁
     this.globalData.dashboardFetching = true;
 
-    // 创建新的请求Promise
+    // 创建带超时保护的请求 Promise
     this.globalData.dashboardFetchPromise = new Promise((resolve, reject) => {
+      // 超时定时器
+      const timeoutId = setTimeout(() => {
+        console.error('[App] ❌ Dashboard 请求超时');
+        this.globalData.dashboardFetching = false;
+        this.globalData.dashboardFetchPromise = null;
+        reject(new Error('Dashboard 请求超时'));
+      }, timeout);
+
       cloudRequest.callContainer({
         path: `/api/dashboard/data?user_id=${userId}`,
         method: 'GET',
         success: (res) => {
+          clearTimeout(timeoutId);
           console.log('[App] 📦 Dashboard接口返回');
 
           // 缓存数据
@@ -111,6 +134,7 @@ App({
           resolve(res);
         },
         fail: (err) => {
+          clearTimeout(timeoutId);
           console.error('[App] ❌ Dashboard接口失败:', err);
 
           // 释放锁并清除缓存
@@ -343,16 +367,15 @@ App({
 
       // 已在称重页则跳过跳转
       if (this.isCurrentPage('pages/scale/scale')) {
-        console.log('[BLE] ⏸️ 已在称重页，跳过');
-        return;
+        console.log('[BLE] \u23F8\uFE0F 已在称重页，跳过');
+        continue;  // 修复：使用 continue 而非 return，继续处理后续设备
       }
-
-      // 【修改】只要数据新鲜且未处于跳转中，就跳转
-      // 不再判断体重是否变化，让称重页自己处理数据更新
+      
+      // 只要数据新鲜且未处于跳转中，就跳转
       if (!this.globalData.scalePageNavigationInFlight) {
         this.checkAndNavigateToScalePage(finalData.weight);
       } else {
-        console.log('[BLE] ⏸️ 跳转进行中，跳过');
+        console.log('[BLE] \u23F8\uFE0F 跳转进行中，跳过');
       }
     }
   },
@@ -456,96 +479,13 @@ App({
   },
 
   // =====================
-  // BLE 时间同步相关方法
+  // BLE 时间同步相关方法（使用 BLEBridge 统一封装）
   // =====================
 
   /**
-   * 创建 BLE 连接（Promise 封装）
-   */
-  createBLEConnection(deviceId) {
-    return new Promise((resolve, reject) => {
-      wx.createBLEConnection({
-        deviceId,
-        timeout: 10000,
-        success: resolve,
-        fail: reject
-      });
-    });
-  },
-
-  /**
-   * 获取 BLE 设备服务（Promise 封装）
-   */
-  getBLEDeviceServices(deviceId) {
-    return new Promise((resolve, reject) => {
-      wx.getBLEDeviceServices({
-        deviceId,
-        success: (res) => resolve(res.services),
-        fail: reject
-      });
-    });
-  },
-
-  /**
-   * 获取 BLE 特征值（Promise 封装）
-   */
-  getBLEDeviceCharacteristics(deviceId, serviceId) {
-    return new Promise((resolve, reject) => {
-      wx.getBLEDeviceCharacteristics({
-        deviceId,
-        serviceId,
-        success: (res) => resolve(res.characteristics),
-        fail: reject
-      });
-    });
-  },
-
-  /**
-   * 写入 BLE 特征值（Promise 封装）
-   */
-  writeBLECharacteristicValue(deviceId, serviceId, characteristicId, value) {
-    return new Promise((resolve, reject) => {
-      wx.writeBLECharacteristicValue({
-        deviceId,
-        serviceId,
-        characteristicId,
-        value,
-        success: resolve,
-        fail: reject
-      });
-    });
-  },
-
-  /**
-   * 关闭 BLE 连接（Promise 封装）
-   */
-  closeBLEConnection(deviceId) {
-    return new Promise((resolve, reject) => {
-      wx.closeBLEConnection({
-        deviceId,
-        success: resolve,
-        fail: reject
-      });
-    });
-  },
-
-  /**
-   * 构建时间同步数据（10字节）
-   * 格式：
-   * Byte 0-1: Year (Little Endian)
-   * Byte 2: Month (1-12)
-   * Byte 3: Day (1-31)
-   * Byte 4: Hour (0-23)
-   * Byte 5: Minute (0-59)
-   * Byte 6: Second (0-59)
-   * Byte 7: 0x03 (固定值)
-   * Byte 8: 0x00 (固定值)
-   * Byte 9: 0x00 (固定值)
-   *
-   * 注意：设备期望接收 UTC 时间，不是本地时间
+   * 构建时间同步数据（10字节，UTC 时间）
    */
   buildTimeSyncData(date) {
-    // 使用 UTC 时间，因为设备广播和解析都使用 UTC
     const year = date.getUTCFullYear();
     const month = date.getUTCMonth() + 1;
     const day = date.getUTCDate();
@@ -555,94 +495,60 @@ App({
 
     const buffer = new ArrayBuffer(10);
     const view = new DataView(buffer);
-
-    // Year (Little Endian)
     view.setUint16(0, year, true);
-    // Month
     view.setUint8(2, month);
-    // Day
     view.setUint8(3, day);
-    // Hour
     view.setUint8(4, hour);
-    // Minute
     view.setUint8(5, minute);
-    // Second
     view.setUint8(6, second);
-    // Fixed bytes
     view.setUint8(7, 0x03);
     view.setUint8(8, 0x00);
     view.setUint8(9, 0x00);
-
     return buffer;
   },
 
   /**
-   * 执行设备时间同步（核心逻辑）
+   * 执行设备时间同步（使用 BLEBridge）
    * @param {string} deviceId - 设备ID
    */
   async executeTimeSync(deviceId) {
     console.log('[BLE] 🕐 开始时间同步流程...');
+    const ble = BLEUtils.BLEBridge;
 
     try {
-      // 1. 创建 BLE 连接
-      await this.createBLEConnection(deviceId);
+      await ble.createConnection(deviceId);
       console.log('[BLE] ✅ BLE 连接成功');
 
-      // 2. 获取服务列表
-      const services = await this.getBLEDeviceServices(deviceId);
+      const services = await ble.getServices(deviceId);
       console.log('[BLE] 📦 发现服务数量:', services.length);
 
-      // 3. 查找 Body Composition Service (0x181b)
       const bodyCompService = services.find(s => {
         const uuid = s.uuid.replace(/-/g, '').toLowerCase();
         return uuid.includes('181b');
       });
+      if (!bodyCompService) throw new Error('未找到体成分服务 (0x181b)');
 
-      if (!bodyCompService) {
-        throw new Error('未找到体成分服务 (0x181b)');
-      }
-
-      // 4. 获取特征值列表
-      const characteristics = await this.getBLEDeviceCharacteristics(
-        deviceId,
-        bodyCompService.uuid
-      );
-
-      // 5. 查找 Current Time 特征 (0x2a2b)
+      const characteristics = await ble.getCharacteristics(deviceId, bodyCompService.uuid);
       const currentTimeChar = characteristics.find(c => {
         const uuid = c.uuid.replace(/-/g, '').toLowerCase();
         return uuid.includes('2a2b');
       });
+      if (!currentTimeChar) throw new Error('未找到 Current Time 特征 (0x2a2b)');
 
-      if (!currentTimeChar) {
-        throw new Error('未找到 Current Time 特征 (0x2a2b)');
-      }
-
-      // 6. 构建并写入时间数据（10字节）
       const timeData = this.buildTimeSyncData(new Date());
-      await this.writeBLECharacteristicValue(
-        deviceId,
-        bodyCompService.uuid,
-        currentTimeChar.uuid,
-        timeData
-      );
+      await ble.writeValue(deviceId, bodyCompService.uuid, currentTimeChar.uuid, timeData);
       console.log('[BLE] ✅ 时间写入成功');
 
-      // 7. 断开连接（让设备重启以激活新时间）
-      await this.closeBLEConnection(deviceId);
+      await ble.closeConnection(deviceId);
       console.log('[BLE] 🔌 已断开连接，等待设备重启...');
-
-      // 8. 等待设备重启完成（2秒）
       await new Promise(resolve => setTimeout(resolve, 2000));
-
       console.log('[BLE] ✅ 时间同步完成！');
 
     } catch (err) {
       console.error('[BLE] ❌ 时间同步失败:', err.message);
 
-      // 确保关闭连接
       try {
-        await this.closeBLEConnection(deviceId);
+        await ble.closeConnection(deviceId);
       } catch (closeErr) {
         console.warn('[BLE] ⚠️ 关闭连接失败:', closeErr.message);
       }
@@ -653,7 +559,7 @@ App({
         duration: 3000
       });
 
-      throw err; // 重新抛出错误，让调用者处理
+      throw err;
     }
   },
 
@@ -769,10 +675,11 @@ App({
     wx.showLoading({ title: '连接秤...', mask: true });
 
     const releaseLock = () => {
+      // 缩短延迟至 300ms，避免 BLE 300ms 扫描周期内的重复跳转
       setTimeout(() => {
         this.globalData.scalePageNavigationInFlight = false;
         wx.hideLoading();
-      }, 1000);
+      }, 300);
     };
 
     wx.navigateTo({
