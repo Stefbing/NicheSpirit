@@ -5,17 +5,16 @@
  * - 401 自动跳转登录
  */
 
-// ===== 自动模式检测 =====
-// 尝试加载 .env.js —— 文件存在 → 本地模式；不存在 → 云开发模式
+// 配置：切换运行环境
 const CONFIG = {
-  // 默认：云开发模式（生产环境）
-  mode: 'cloud',
+  // 'cloud' - 云托管模式, 'local' - 本地调试模式
+  mode: 'local',
 
   // 云托管配置
   cloudEnv: 'prod-d5g0so0137afcfdd5',
   cloudService: 'auto-home',
 
-  // 本地调试配置（.env.js 存在时会被覆盖）
+  // 本地调试配置（替换为你的本地后端地址）
   localBaseUrl: 'http://192.168.1.3:8000',
 
   // 请求超时（ms）
@@ -23,15 +22,6 @@ const CONFIG = {
   // 最大重试次数
   maxRetries: 1
 };
-
-// 自动识别：如果项目中有 .env.js 文件，自动切为本地模式
-try {
-  const localEnv = require('./.env.js');
-  Object.assign(CONFIG, localEnv);
-  console.log(`[Config] ✅ 检测到 .env.js，使用本地模式 → ${CONFIG.localBaseUrl}`);
-} catch (e) {
-  console.log('[Config] 🌥 未检测到 .env.js，使用云开发模式');
-}
 
 let isCloudInitialized = false;
 
