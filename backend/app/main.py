@@ -1390,6 +1390,8 @@ async def wx_code2session(code: str) -> dict:
         raise HTTPException(status_code=500, detail="微信服务配置缺失")
 
     import httpx
+    import ssl
+
     url = "https://api.weixin.qq.com/sns/jscode2session"
     params = {
         "appid": WECHAT_APPID,
@@ -1397,9 +1399,24 @@ async def wx_code2session(code: str) -> dict:
         "js_code": code,
         "grant_type": "authorization_code",
     }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(url, params=params)
-        data = resp.json()
+
+    # 云托管环境可能缺失系统 CA 证书，先尝试默认验证，失败则降级
+    for attempt, verify in enumerate([True, False]):
+        try:
+            client_kwargs = {"timeout": 10.0}
+            if not verify:
+                client_kwargs["verify"] = False
+                logger.warning("微信 API SSL 验证已禁用（云托管环境兼容模式）")
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                resp = await client.get(url, params=params)
+                data = resp.json()
+            break  # 成功则退出重试循环
+        except (httpx.ConnectError, ssl.SSLError) as e:
+            if attempt == 0:
+                logger.warning(f"微信 API SSL 验证失败，尝试禁用验证重试: {e}")
+                continue
+            logger.error(f"微信 API 请求失败（已尝试禁用 SSL）: {e}")
+            raise HTTPException(status_code=502, detail="微信服务请求失败（SSL 连接错误）")
 
     if "errcode" in data and data["errcode"] != 0:
         logger.error(f"微信 code2session 失败: {data}")
