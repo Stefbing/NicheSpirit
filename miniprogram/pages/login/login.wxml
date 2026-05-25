@@ -1,17 +1,23 @@
 <view class="page">
-  <!-- 背景装饰粒子 -->
+  <!-- 背景装饰光晕粒子 -->
   <view class="bg-orb bg-orb-1"></view>
   <view class="bg-orb bg-orb-2"></view>
   <view class="bg-orb bg-orb-3"></view>
+  <view class="bg-orb bg-orb-4"></view>
+
+  <!-- 扫描线网格层 -->
+  <view class="grid-overlay"></view>
+  <view class="scanline"></view>
 
   <view class="card">
 
     <!-- ====== 模式：静默登录中 ====== -->
     <block wx:if="{{loginMode === 'loading'}}">
       <view class="mode-wrap">
-        <view class="brand-icon">⚡</view>
-        <view class="title">冷门器灵</view>
-        <view class="subtitle">智能家居控制中心</view>
+        <view class="brand-area">
+          <text class="brand-title">冷门器灵</text>
+          <text class="brand-desc">智能家居控制中心</text>
+        </view>
         <view class="divider-line"></view>
         <view class="loading-area">
           <view class="loading-dot loading-dot-1"></view>
@@ -25,20 +31,21 @@
     <!-- ====== 模式：登录方式选择 ====== -->
     <block wx:elif="{{loginMode === 'select'}}">
       <view class="mode-wrap">
-        <view class="brand-icon">⚡</view>
-        <view class="title">冷门器灵</view>
-        <view class="subtitle">选择登录方式</view>
+        <view class="brand-area">
+          <text class="brand-title">冷门器灵</text>
+          <text class="brand-desc">智能家居控制中心</text>
+        </view>
         <view class="divider-line"></view>
 
         <view class="error-msg" wx:if="{{errorMsg}}">{{errorMsg}}</view>
 
-        <!-- 本账号密码登录 -->
+        <!-- 本机登录 -->
         <view class="select-card" bindtap="onSelectOwnPassword">
           <view class="select-icon-wrap">
-            <text class="select-icon">⟐</text>
+            <text class="select-icon">📱</text>
           </view>
           <view class="select-body">
-            <view class="select-title">本账号密码登录</view>
+            <view class="select-title">本机登录</view>
             <view class="select-desc" wx:if="{{lastLogoutPhoneDisplay || lastLogoutPhone}}">
               {{lastLogoutPhoneDisplay || lastLogoutPhone}}
             </view>
@@ -47,14 +54,14 @@
           <text class="select-arrow">›</text>
         </view>
 
-        <!-- 其他手机号绑定 -->
+        <!-- 其他方式登录 -->
         <view class="select-card" bindtap="onSelectOtherPhone">
           <view class="select-icon-wrap">
-            <text class="select-icon">⊕</text>
+            <text class="select-icon">🌐</text>
           </view>
           <view class="select-body">
-            <view class="select-title">其他手机号登录</view>
-            <view class="select-desc">使用新手机号注册或绑定</view>
+            <view class="select-title">其他方式登录</view>
+            <view class="select-desc">使用其他账号密码登录</view>
           </view>
           <text class="select-arrow">›</text>
         </view>
@@ -62,110 +69,100 @@
         <view class="pull-hint" wx:if="{{canPullDownSilent}}">
           <text class="pull-icon">⬇</text> 下拉可尝试微信静默登录
         </view>
-
-        <view class="silent-btn" wx:if="{{canPullDownSilent}}" bindtap="onSilentLogin">
-          尝试静默登录
-        </view>
       </view>
     </block>
 
-    <!-- ====== 模式：本账号密码登录 ====== -->
+    <!-- ====== 模式：本机登录（原"本账号密码登录"） ====== -->
     <block wx:elif="{{loginMode === 'own_password'}}">
       <view class="mode-wrap">
-        <view class="brand-icon">⚡</view>
-        <view class="title">冷门器灵</view>
-        <view class="subtitle">本账号密码登录</view>
-        <view class="divider-line"></view>
-
-        <view class="input-field {{isPhoneAutoFilled ? 'auto-filled' : ''}}">
-          <text class="input-label">手机号</text>
-          <input
-            class="td-input"
-            type="text"
-            maxlength="11"
-            placeholder="请输入手机号"
-            value="{{ownAccountDisplay}}"
-            bindfocus="onOwnAccountFocus"
-            bindinput="onOwnAccountInput"
-          />
-          <text class="input-border"></text>
-          <text class="auto-fill-tip" wx:if="{{isPhoneAutoFilled}}">点击输入框可修改</text>
+        <view class="form-header">
+          <text class="back-btn" bindtap="onBackToSelect">←</text>
+          <text class="form-title">本机登录</text>
         </view>
 
-        <view class="input-field">
-          <text class="input-label">密码</text>
-          <input
-            class="td-input"
-            type="password"
-            maxlength="32"
-            placeholder="请输入密码（至少6位）"
-            value="{{ownPassword}}"
-            bindinput="onOwnPasswordInput"
-          />
-          <text class="input-border"></text>
+        <view class="input-group">
+          <view class="input-row {{isPhoneAutoFilled ? 'auto-filled' : ''}}">
+            <text class="input-icon">📱</text>
+            <input
+              class="login-input"
+              type="text"
+              maxlength="11"
+              placeholder="请输入手机号"
+              value="{{ownAccountDisplay}}"
+              bindfocus="onOwnAccountFocus"
+              bindinput="onOwnAccountInput"
+            />
+            <text class="auto-fill-tip" wx:if="{{isPhoneAutoFilled}}">可修改</text>
+          </view>
+
+          <view class="input-row">
+            <text class="input-icon">🔒</text>
+            <input
+              class="login-input"
+              type="password"
+              maxlength="32"
+              placeholder="请输入密码（至少4位）"
+              value="{{ownPassword}}"
+              bindinput="onOwnPasswordInput"
+            />
+          </view>
         </view>
 
         <button
-          class="submit-btn {{loading || !ownAccount || !ownPassword || ownPassword.length < 6 ? 'disabled' : ''}}"
+          class="submit-btn {{loading || !ownAccount || !ownPassword || ownPassword.length < 4 ? 'disabled' : ''}}"
           bindtap="handleOwnPasswordLogin"
-          disabled="{{loading || !ownAccount || !ownPassword || ownPassword.length < 6}}"
+          disabled="{{loading || !ownAccount || !ownPassword || ownPassword.length < 4}}"
         >
-          <view class="btn-bg"></view>
           <text class="btn-text">{{loading ? '登录中…' : '登录'}}</text>
         </button>
 
         <view class="error-msg" wx:if="{{errorMsg}}">{{errorMsg}}</view>
-
-        <text class="link-btn" bindtap="onBackToSelect">← 返回选择登录方式</text>
       </view>
     </block>
 
-    <!-- ====== 模式：其他手机号绑定 ====== -->
+    <!-- ====== 模式：其他方式登录（原"其他手机号绑定"） ====== -->
     <block wx:elif="{{loginMode === 'bind'}}">
       <view class="mode-wrap">
-        <view class="brand-icon">⚡</view>
-        <view class="title">冷门器灵</view>
-        <view class="subtitle">手机号注册 / 绑定</view>
-        <view class="divider-line"></view>
-
-        <view class="input-field">
-          <text class="input-label">手机号</text>
-          <input
-            class="td-input"
-            type="number"
-            maxlength="11"
-            placeholder="请输入手机号"
-            value="{{account}}"
-            bindinput="onAccountInput"
-          />
-          <text class="input-border"></text>
+        <view class="form-header">
+          <text class="back-btn" bindtap="onBackToSelect">←</text>
+          <text class="form-title">其他方式登录</text>
         </view>
 
-        <view class="input-field">
-          <text class="input-label">密码</text>
-          <input
-            class="td-input"
-            type="password"
-            maxlength="32"
-            placeholder="请输入密码（至少6位）"
-            value="{{password}}"
-            bindinput="onPasswordInput"
-          />
-          <text class="input-border"></text>
+        <view class="input-group">
+          <view class="input-row">
+            <text class="input-icon">📱</text>
+            <input
+              class="login-input"
+              type="number"
+              maxlength="11"
+              placeholder="请输入手机号"
+              value="{{account}}"
+              bindinput="onAccountInput"
+            />
+          </view>
+
+          <view class="input-row">
+            <text class="input-icon">🔒</text>
+            <input
+              class="login-input"
+              type="password"
+              maxlength="32"
+              placeholder="请输入密码（至少4位）"
+              value="{{password}}"
+              bindinput="onPasswordInput"
+            />
+          </view>
         </view>
 
         <button
-          class="submit-btn {{loading || !account || account.length !== 11 || !password || password.length < 6 ? 'disabled' : ''}}"
+          class="submit-btn {{loading || !account || account.length !== 11 || !password || password.length < 4 ? 'disabled' : ''}}"
           bindtap="handleBindLogin"
-          disabled="{{loading || !account || account.length !== 11 || !password || password.length < 6}}"
+          disabled="{{loading || !account || account.length !== 11 || !password || password.length < 4}}"
         >
-          <view class="btn-bg"></view>
           <text class="btn-text">{{loading ? '绑定中…' : '登录并绑定微信'}}</text>
         </button>
 
         <view class="error-msg" wx:if="{{errorMsg}}">{{errorMsg}}</view>
-
-        <text class="link-btn" bindtap="onBackToSelect">← 返回选择登录方式</text>
       </view>
     </block>
 

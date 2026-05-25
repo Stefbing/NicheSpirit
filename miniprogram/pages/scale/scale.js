@@ -136,6 +136,8 @@ Page({
   },
 
   onShow() {
+    // 隐藏右上角"..."菜单的分享功能，统一使用页内分享入口
+    wx.hideShareMenu({ menus: ['share', 'shareTimeline'] });
     console.log('[Scale] 📄 页面显示');
 
     // 【关键】页面重新显示时，完全重置到初始状态
@@ -1320,24 +1322,51 @@ Page({
   },
   
   /**
-   * 转发给朋友 - 启用右上角菜单的"转发"功能
+   * 转发给朋友 - 通过页内分享按钮触发，仅分享当前设备
    */
   onShareAppMessage(res) {
+    const token = this._pendingShareToken || '';
+    this._pendingShareToken = '';
     return {
-      title: '我的智能体脂秤',
-      path: '/pages/scale/scale',
-      imageUrl: '' // 可选：自定义分享图片路径
+      title: this._shareTitle || '我的智能体脂秤',
+      path: token ? `/pages/index/index?share_token=${token}` : '/pages/scale/scale',
+      imageUrl: ''
     }
   },
-  
+
   /**
-   * 分享到朋友圈 - 启用右上角菜单的"分享到朋友圈"功能
+   * 单设备分享：点击设备卡片上的分享按钮
    */
-  onShareTimeline() {
-    return {
-      title: '我的智能体脂秤',
-      query: '',
-      imageUrl: '' // 可选：自定义分享图片路径
+  onDeviceShare() {
+    const userInfo = wx.getStorageSync('userInfo');
+    if (!userInfo || !userInfo.user_id) {
+      wx.showToast({ title: '请先登录', icon: 'none' });
+      return;
     }
+
+    wx.showLoading({ title: '准备分享...', mask: true });
+
+    cloudRequest.callContainer({
+      path: '/api/share/create',
+      method: 'POST',
+      data: {
+        from_user_id: userInfo.user_id,
+        device_keys: ['xiaomi_xiaomi'],
+      },
+      success: (res) => {
+        wx.hideLoading();
+        if (res && res.share_token) {
+          this._pendingShareToken = res.share_token;
+          this._shareTitle = '分享智能体脂秤';
+        } else {
+          wx.showToast({ title: '分享创建失败', icon: 'none' });
+        }
+      },
+      fail: (err) => {
+        wx.hideLoading();
+        console.error('[Scale] 创建分享失败:', err);
+        wx.showToast({ title: '分享创建失败', icon: 'none' });
+      }
+    });
   }
 });

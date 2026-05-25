@@ -1,8 +1,8 @@
-from sqlmodel import SQLModel, Field
-from typing import Optional
+from sqlmodel import SQLModel, Field, Column, Text
+from typing import Optional, List
 import time
 import uuid
-from sqlalchemy import BIGINT, Column
+from sqlalchemy import BIGINT
 
 class User(SQLModel, table=True):
     """用户表 - 存储小程序用户信息"""
@@ -62,6 +62,35 @@ class FamilyMember(SQLModel, table=True):
     is_active: bool = Field(default=True)  # 是否激活
     created_at: int = Field(default_factory=lambda: int(time.time() * 1000), sa_column=Column(BIGINT, nullable=False))
     updated_at: int = Field(default_factory=lambda: int(time.time() * 1000), sa_column=Column(BIGINT, nullable=False))
+
+class DeviceShare(SQLModel, table=True):
+    """设备分享记录表"""
+    __tablename__ = "device_share"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    from_user_id: int = Field(index=True)
+    to_user_id: Optional[int] = Field(default=None, index=True)
+    share_token: str = Field(max_length=64, unique=True, index=True)
+    status: str = Field(default="pending", max_length=16)  # pending / accepted / revoked
+    device_keys: str = Field(sa_column=Column(Text, nullable=False))  # JSON array
+    created_at: int = Field(default_factory=lambda: int(time.time() * 1000), sa_column=Column(BIGINT, nullable=False))
+    accepted_at: Optional[int] = Field(default=None, sa_column=Column(BIGINT))
+    expires_at: int = Field(sa_column=Column(BIGINT, nullable=False))
+
+class SharedDeviceConfig(SQLModel, table=True):
+    """分享设备配置映射表"""
+    __tablename__ = "shared_device_config"
+    __table_args__ = {"extend_existing": True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    share_id: int = Field(index=True)
+    to_user_id: int = Field(index=True)
+    platform: str = Field(max_length=32, index=True)
+    device_key: str = Field(max_length=64)
+    config_account: str = Field(max_length=128)
+    config_password: str = Field(max_length=256)
+    created_at: int = Field(default_factory=lambda: int(time.time() * 1000), sa_column=Column(BIGINT, nullable=False))
 
 class SystemConfig(SQLModel, table=True):
     """系统配置表 - 支持多用户多设备，user_id=0为全局配置"""

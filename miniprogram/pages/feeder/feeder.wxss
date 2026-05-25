@@ -24,14 +24,16 @@ page {
 
 .hero-top {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 16rpx;
 }
 
 .device-info {
   display: flex;
   align-items: center;
   gap: 20rpx;
+  flex: 1;
+  min-width: 0;
 }
 
 .device-icon {
@@ -44,12 +46,15 @@ page {
   justify-content: center;
   font-size: 44rpx;
   box-shadow: 0 4rpx 12rpx rgba(0, 0, 0, 0.08);
+  flex-shrink: 0;
 }
 
 .device-text {
   display: flex;
   flex-direction: column;
   gap: 8rpx;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .device-name {
@@ -57,6 +62,9 @@ page {
   font-weight: 700;
   color: #1E293B;
   letter-spacing: 0.5rpx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .device-status {
@@ -91,6 +99,49 @@ page {
   font-size: 24rpx;
   font-weight: 600;
   box-shadow: 0 2rpx 8rpx rgba(37, 99, 235, 0.1);
+  flex-shrink: 0;
+}
+
+/* ========== 设备分享按钮（行内右侧对齐） ========== */
+.device-share-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 52rpx !important;
+  height: 52rpx !important;
+  min-width: 52rpx !important;
+  max-width: 52rpx !important;
+  border-radius: 12rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.9);
+  border: none;
+  padding: 0 !important;
+  /* 使用 margin-right 保持与卡片右内边距对齐，margin-left:auto 提供行内推右 */
+  margin-right: 0 !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+  line-height: 1;
+  transition: all 0.2s;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.06);
+}
+
+.device-share-btn::after {
+  border: none !important;
+}
+
+.device-share-btn:active {
+  transform: scale(0.9);
+  opacity: 0.7;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+/* === 分享图标：↗ 符号 === */
+.share-icon {
+  font-size: 32rpx;
+  font-weight: 700;
+  color: #6B7280;
+  line-height: 1;
 }
 
 /* ========== 快速投喂卡片 ========== */

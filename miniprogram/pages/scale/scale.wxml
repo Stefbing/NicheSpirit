@@ -24,6 +24,9 @@
                     <button class="btn-reset" bindtap="immediateReset" size="mini">重置</button>
                 </view>
             </view>
+            <button class="device-share-btn" bindtap="onDeviceShare" open-type="share">
+                <text class="share-icon">↗</text>
+            </button>
         </view>
     </view>
 

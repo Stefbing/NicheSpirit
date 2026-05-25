@@ -12,6 +12,8 @@ App({
   globalData: {
     // 环境标识
     environment: "development",
+    // 待处理的分享 token（登录前收到，登录后处理）
+    _pendingShareToken: '',
 
     // 蓝牙状态（简化）
     bleAdapterInitialized: false,

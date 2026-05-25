@@ -16,20 +16,49 @@ Page({
     deviceAccount: '',
     devicePassword: '',
     greeting: '',
-    devicesLoaded: false  // 标记设备是否已加载
+    devicesLoaded: false,  // 标记设备是否已加载
+    // 登录视图状态
+    loginView: 'main',     // 'main' | 'phone' | 'other'
+    otherAccount: '',
+    otherPassword: '',
+    // 分享相关
+    showShareConfirm: false,
+    showAcceptShare: false,
+    shareToken: '',
+    shareFromName: '',
   },
   
-  onLoad: function () {
+  onLoad: function (query) {
+    // 隐藏系统导航栏左侧可能出现的"返回首页"按钮
+    wx.hideHomeButton()
+
     this.updateGreeting()
-    // 只在onLoad时检查登录状态并加载设备，避免重复调用
     this.checkLoginStatus()
+
+    // 检测是否从分享卡片进入（携带 share_token）
+    if (query && query.share_token) {
+      this.setData({ shareToken: query.share_token })
+      this.handleIncomingShare(query.share_token)
+    }
   },
   
   onShow: function() {
+    // 关闭右上角"..."菜单的分享功能，统一使用页内分享按钮
+    wx.hideShareMenu({ menus: ['share', 'shareTimeline'] });
+
     // 关闭前页跳转时可能留下的 loading 遮罩（如登录页 → 首页）
     wx.hideLoading();
     
     this.updateGreeting()
+
+    // 检查是否有登录后待处理的分享
+    const pendingToken = app.globalData._pendingShareToken
+    if (pendingToken && this.data.userInfo && this.data.userInfo.user_id) {
+      app.globalData._pendingShareToken = ''
+      this.setData({ shareToken: pendingToken })
+      this.handleIncomingShare(pendingToken)
+    }
+
     // onShow不再加载设备数据，只处理设备状态监听
     if (this.data.userInfo) {
       // 注册设备状态更新监听
@@ -155,7 +184,67 @@ Page({
   onPhoneInput(e) {
     this.setData({ phoneNumber: e.detail.value })
   },
-  
+
+  // ===== 登录视图切换 =====
+  switchToPhoneLogin() {
+    this.setData({ loginView: 'phone', phoneNumber: '' })
+  },
+  switchToOtherLogin() {
+    this.setData({ loginView: 'other', otherAccount: '', otherPassword: '' })
+  },
+  switchToMain() {
+    this.setData({ loginView: 'main' })
+  },
+
+  // 其他方式 - 账号输入
+  onOtherAccountInput(e) {
+    this.setData({ otherAccount: e.detail.value })
+  },
+  // 其他方式 - 密码输入
+  onOtherPasswordInput(e) {
+    this.setData({ otherPassword: e.detail.value })
+  },
+  // 其他方式 - 登录
+  async onOtherLogin() {
+    const { otherAccount, otherPassword } = this.data
+    if (!otherAccount) {
+      wx.showToast({ title: '请输入账号', icon: 'none' })
+      return
+    }
+    if (!otherPassword || otherPassword.length < 4) {
+      wx.showToast({ title: '密码至少4位', icon: 'none' })
+      return
+    }
+    wx.showLoading({ title: '登录中...' })
+    try {
+      const res = await cloudRequest.callContainer({
+        path: '/api/auth/login',
+        method: 'POST',
+        data: {
+          phone_number: otherAccount,
+          nickname: `用户${otherAccount.slice(-4)}`,
+          password: otherPassword
+        }
+      })
+      const userInfo = res
+      wx.setStorageSync('userInfo', userInfo)
+      this.setData({ userInfo, loginView: 'main' })
+      const app = getApp()
+      if (!app.globalData.bleAdapterInitialized) {
+        await app.checkAndInitBluetooth(userInfo.user_id)
+      }
+      if (!this.data.devicesLoaded) {
+        await this.loadUserDevices()
+      }
+      wx.hideLoading()
+      wx.showToast({ title: '登录成功', icon: 'success' })
+    } catch (err) {
+      wx.hideLoading()
+      console.error('其他方式登录异常:', err)
+      wx.showToast({ title: err.errMsg || '登录失败，请重试', icon: 'none', duration: 3000 })
+    }
+  },
+
   // 登录/注册
   async onLogin() {
     const { phoneNumber } = this.data
@@ -179,7 +268,7 @@ Page({
       
       const userInfo = res
       wx.setStorageSync('userInfo', userInfo)
-      this.setData({ userInfo })
+      this.setData({ userInfo, loginView: 'main' })
       
       // 先初始化蓝牙（会获取并缓存dashboard数据）
       const app = getApp()
@@ -730,33 +819,176 @@ Page({
     }
   },
   
+  // ==================== 分享功能 ====================
+
   /**
-   * 转发给朋友 - 启用右上角菜单的"转发"功能
+   * 点击分享按钮 → 显示确认弹窗
    */
-  onShareAppMessage(res) {
-    // 获取当前用户信息用于个性化分享
-    const userInfo = this.data.userInfo
-    const userName = userInfo ? (userInfo.nickname || '我的智能家') : '我的智能家'
-    
-    return {
-      title: `${userName}的智能设备中心`,
-      path: '/pages/index/index',
-      imageUrl: '' // 可选：自定义分享图片路径，留空使用默认截图
+  onShareConfirm() {
+    if (!this.data.userDevices || this.data.userDevices.length === 0) {
+      wx.showToast({ title: '暂无设备可分享', icon: 'none' })
+      return
+    }
+    this.setData({ showShareConfirm: true })
+  },
+
+  closeShareConfirm() {
+    this.setData({ showShareConfirm: false })
+  },
+
+  closeAcceptShare() {
+    this.setData({ showAcceptShare: false })
+  },
+
+  /**
+   * 确认分享后，调用后端创建分享记录，然后触发微信原生分享
+   */
+  async doShare() {
+    const userInfo = this.data.userInfo || wx.getStorageSync('userInfo')
+    if (!userInfo || !userInfo.user_id) {
+      wx.showToast({ title: '请先登录', icon: 'none' })
+      return
+    }
+
+    // 收集所有设备的 device_key
+    const allKeys = []
+    this.data.userDevices.forEach(d => {
+      if (d.device_key) allKeys.push(d.device_key)
+    })
+    if (allKeys.length === 0) {
+      wx.showToast({ title: '暂无设备可分享', icon: 'none' })
+      return
+    }
+
+    try {
+      // 调用后端创建分享
+      const res = await cloudRequest.callContainer({
+        path: '/api/share/create',
+        method: 'POST',
+        data: {
+          from_user_id: userInfo.user_id,
+          device_keys: allKeys,
+        },
+      })
+
+      if (res && res.share_token) {
+        // 保存 share_token 供 onShareAppMessage 使用
+        this._pendingShareToken = res.share_token
+        this.setData({ showShareConfirm: false })
+        // 后续通过 open-type="share" 触发 onShareAppMessage
+      }
+    } catch (err) {
+      console.error('[Share] 创建分享失败:', err)
+      wx.showToast({ title: '分享创建失败', icon: 'none' })
+      this.setData({ showShareConfirm: false })
     }
   },
-  
+
   /**
-   * 分享到朋友圈 - 启用右上角菜单的"分享到朋友圈"功能
+   * 转发给朋友 - 生成分享卡片
+   */
+  onShareAppMessage(res) {
+    const userInfo = this.data.userInfo || wx.getStorageSync('userInfo')
+    const userName = userInfo ? (userInfo.nickname || '我的智能家') : '好友'
+    const token = this._pendingShareToken || ''
+
+    // 分享后清除暂存 token
+    this._pendingShareToken = ''
+
+    // 如果是从右上角菜单转发（无 token），尝试创建分享
+    if (!token && userInfo) {
+      // 静默创建分享：异步发起，但 WeChat 分享卡片参数需同步返回
+      // 采用懒加载策略：传参带特殊标记，B 打开时后端实时查询
+      return {
+        title: `${userName} 邀请您使用智能设备`,
+        path: `/pages/index/index?from_uid=${userInfo.user_id || ''}`,
+        imageUrl: '',
+      }
+    }
+
+    return {
+      title: `${userName} 邀请您使用智能设备`,
+      path: `/pages/index/index?share_token=${token}`,
+      imageUrl: '',
+    }
+  },
+
+  /**
+   * 分享到朋友圈
    */
   onShareTimeline() {
-    // 获取当前用户信息用于个性化分享
-    const userInfo = this.data.userInfo
+    const userInfo = this.data.userInfo || wx.getStorageSync('userInfo')
     const userName = userInfo ? (userInfo.nickname || '我的智能家') : '我的智能家'
-    
+
     return {
       title: `${userName}的智能设备中心`,
-      query: '', // 分享给朋友圈时不携带参数，直接进入首页
-      imageUrl: '' // 可选：自定义分享图片路径
+      query: '',
+      imageUrl: '',
     }
-  }
+  },
+
+  /**
+   * 处理收到的分享（B 打开分享卡片时调用）
+   */
+  async handleIncomingShare(shareToken) {
+    if (!shareToken) return
+
+    // 等待登录就绪
+    const userInfo = this.data.userInfo || wx.getStorageSync('userInfo')
+    if (!userInfo || !userInfo.user_id) {
+      // 用户未登录，保存 token 到全局，登录后再处理
+      app.globalData._pendingShareToken = shareToken
+      return
+    }
+
+    // 已登录，显示接受分享确认
+    try {
+      // 查询分享者信息（可选，用于显示名称）
+      this.setData({
+        showAcceptShare: true,
+        shareToken: shareToken,
+        shareFromName: '好友',
+      })
+    } catch (err) {
+      console.error('[Share] 加载分享信息失败:', err)
+    }
+  },
+
+  /**
+   * 接受分享 → 调用后端自动配置
+   */
+  async acceptShare() {
+    const userInfo = this.data.userInfo || wx.getStorageSync('userInfo')
+    if (!userInfo || !userInfo.user_id) {
+      wx.showToast({ title: '请先登录', icon: 'none' })
+      return
+    }
+
+    this.setData({ showAcceptShare: false })
+    wx.showLoading({ title: '配置中…', mask: true })
+
+    try {
+      const res = await cloudRequest.callContainer({
+        path: '/api/share/accept',
+        method: 'POST',
+        data: {
+          share_token: this.data.shareToken,
+          to_user_id: userInfo.user_id,
+        },
+      })
+
+      wx.hideLoading()
+      if (res && res.success) {
+        wx.showToast({ title: '设备已添加', icon: 'success', duration: 2000 })
+        // 重新加载设备列表
+        setTimeout(() => this.loadUserDevices(), 1500)
+      } else {
+        wx.showToast({ title: res?.message || '配置失败', icon: 'none' })
+      }
+    } catch (err) {
+      wx.hideLoading()
+      const msg = err?.data?.detail || err?.errMsg || '接受分享失败'
+      wx.showToast({ title: msg, icon: 'none' })
+    }
+  },
 })

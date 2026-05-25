@@ -15,6 +15,9 @@
       <button class="refresh-btn {{refreshing ? 'loading' : ''}}" bindtap="refreshData" loading="{{refreshing}}" disabled="{{refreshing}}">
         <text wx:if="{{!refreshing}}">刷新</text>
       </button>
+      <button class="device-share-btn" bindtap="onDeviceShare" open-type="share">
+        <text class="share-icon">↗</text>
+      </button>
     </view>
   </view>
 

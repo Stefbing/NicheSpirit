@@ -209,8 +209,8 @@ Page({
       this.setData({ errorMsg: '手机号不正确' });
       return;
     }
-    if (!ownPassword || ownPassword.length < 6) {
-      this.setData({ errorMsg: '密码至少6位' });
+    if (!ownPassword || ownPassword.length < 4) {
+      this.setData({ errorMsg: '密码至少4位' });
       return;
     }
     this.setData({ loading: true, errorMsg: '' });
@@ -244,8 +244,8 @@ Page({
       this.setData({ errorMsg: '请输入正确的11位手机号' });
       return;
     }
-    if (password.length < 6) {
-      this.setData({ errorMsg: '密码至少6位' });
+    if (password.length < 4) {
+      this.setData({ errorMsg: '密码至少4位' });
       return;
     }
     this.setData({ loading: true, errorMsg: '' });

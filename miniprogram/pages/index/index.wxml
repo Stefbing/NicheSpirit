@@ -1,34 +1,74 @@
 <view class="page">
-  <!-- 未登录状态 - 直接输入 -->
+  <!-- 未登录状态 -->
   <view wx:if="{{!userInfo}}" class="login-page">
-    <view class="login-content">
-      <view class="brand-section">
-        <text class="brand-icon">🏠</text>
-        <text class="brand-title">我的智能家</text>
-        <text class="brand-desc">智能家居控制中心</text>
-      </view>
-
-      <view class="login-form">
-        <view class="input-wrapper">
-          <input
-            class="phone-input"
-            type="number"
-            placeholder="请输入手机号"
-            value="{{phoneNumber}}"
-            bindinput="onPhoneInput"
-            bindconfirm="onLogin"
-            maxlength="11"
-            focus="{{true}}"
-          />
+    <view class="login-card">
+      <!-- 主界面：两个登录选项 -->
+      <view wx:if="{{loginView === 'main'}}" class="login-main">
+        <view class="brand-section">
+          <text class="brand-title">我的智能家</text>
+          <text class="brand-desc">智能家居控制中心</text>
         </view>
 
-        <button class="login-btn {{phoneNumber.length === 11 ? 'active' : ''}}"
-                bindtap="onLogin"
-                disabled="{{phoneNumber.length !== 11}}">
+        <button class="local-login-btn" bindtap="switchToPhoneLogin">
+          <text class="btn-icon-inline">📱</text>
+          <text>本机登录</text>
+        </button>
+
+        <view class="other-login-link" bindtap="switchToOtherLogin">
+          <text>其他方式登录</text>
+          <text class="link-arrow">→</text>
+        </view>
+      </view>
+
+      <!-- 本机登录 - 手机号输入 -->
+      <view wx:elif="{{loginView === 'phone'}}" class="login-sub">
+        <view class="form-header">
+          <text class="back-btn" bindtap="switchToMain">←</text>
+          <text class="form-title">本机登录</text>
+        </view>
+
+        <view class="input-group">
+          <view class="input-row">
+            <text class="input-icon">📱</text>
+            <input class="sub-input" type="number" placeholder="请输入手机号"
+                   value="{{phoneNumber}}" bindinput="onPhoneInput"
+                   bindconfirm="onLogin" maxlength="11" focus="{{true}}" />
+          </view>
+        </view>
+
+        <button class="sub-login-btn {{phoneNumber.length === 11 ? 'active' : ''}}"
+                bindtap="onLogin" disabled="{{phoneNumber.length !== 11}}">
           登录 / 注册
         </button>
 
-        <text class="login-tip">演示账号：18021518830</text>
+        <text class="sub-tip">演示账号：18021518830</text>
+      </view>
+
+      <!-- 其他方式登录 - 账号密码 -->
+      <view wx:elif="{{loginView === 'other'}}" class="login-sub">
+        <view class="form-header">
+          <text class="back-btn" bindtap="switchToMain">←</text>
+          <text class="form-title">其他方式登录</text>
+        </view>
+
+        <view class="input-group">
+          <view class="input-row">
+            <text class="input-icon">👤</text>
+            <input class="sub-input" placeholder="请输入账号"
+                   value="{{otherAccount}}" bindinput="onOtherAccountInput" />
+          </view>
+          <view class="input-row">
+            <text class="input-icon">🔒</text>
+            <input class="sub-input" type="password" placeholder="请输入密码（至少4位）"
+                   value="{{otherPassword}}" bindinput="onOtherPasswordInput" />
+          </view>
+        </view>
+
+        <button class="sub-login-btn {{otherAccount.length > 0 && otherPassword.length >= 4 ? 'active' : ''}}"
+                bindtap="onOtherLogin"
+                disabled="{{!(otherAccount.length > 0 && otherPassword.length >= 4)}}">
+          登录
+        </button>
       </view>
     </view>
   </view>
@@ -46,6 +86,9 @@
         </button>
         <button class="icon-btn add-btn" bindtap="showAddDeviceModal">
           <text class="btn-icon">➕</text>
+        </button>
+        <button class="icon-btn share-btn" bindtap="onShareConfirm">
+          <text class="share-icon">↗</text>
         </button>
         <button class="icon-btn logout-btn" bindtap="logout">
           <text class="btn-icon">👋</text>
@@ -253,6 +296,34 @@
       </view>
 
       <button class="submit-btn" bindtap="onSubmitDeviceConfig">确认添加</button>
+    </view>
+  </view>
+
+  <!-- 分享确认弹窗 -->
+  <view wx:if="{{showShareConfirm}}" class="modal-mask" bindtap="closeShareConfirm">
+    <view class="modal-box" catchtap="stopPropagation">
+      <view class="modal-title">分享设备</view>
+      <view class="share-desc">
+        <text wx:if="{{userDevices.length > 0}}">分享将使对方自动获取并使用您的全部设备</text>
+        <text wx:else>当前暂无设备可分享</text>
+      </view>
+      <view class="share-btn-row">
+        <button class="share-submit-btn" open-type="share" wx:if="{{userDevices.length > 0}}"
+                bindtap="doShare">确认分享</button>
+        <button class="share-cancel-btn" bindtap="closeShareConfirm">取消</button>
+      </view>
+    </view>
+  </view>
+
+  <!-- 接受分享弹窗 -->
+  <view wx:if="{{showAcceptShare}}" class="modal-mask" bindtap="closeAcceptShare">
+    <view class="modal-box" catchtap="stopPropagation">
+      <view class="modal-title">📩 设备分享</view>
+      <text class="share-desc">{{shareFromName}} 分享了设备给您，是否接受并自动配置？</text>
+      <view class="share-btn-row">
+        <button class="submit-btn" bindtap="acceptShare">接受并配置</button>
+        <button class="share-cancel-btn" bindtap="closeAcceptShare">稍后再说</button>
+      </view>
     </view>
   </view>
 </view>

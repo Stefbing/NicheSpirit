@@ -22,6 +22,7 @@ from .models.db import get_session, init_db, engine
 from .utils.cache_manager import cache_manager
 from .utils.config_encryptor import ConfigEncryptor
 from .scheduler.task_scheduler import scheduler
+from .share_routes import router as share_router
 
 load_dotenv()
 
@@ -349,6 +350,7 @@ async def lifespan(app: FastAPI):
 
 # --- App Config ---
 app = FastAPI(title="Smart Home Controller", version="0.3.0", lifespan=lifespan)
+app.include_router(share_router)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(os.path.dirname(BASE_DIR), "static")

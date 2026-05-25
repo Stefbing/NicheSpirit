@@ -13,6 +13,9 @@
         </view>
       </view>
       <view class="hero-badge">今日已喂 {{todayServings}} 次</view>
+      <button class="device-share-btn" bindtap="onDeviceShare" open-type="share">
+        <text class="share-icon">↗</text>
+      </button>
     </view>
   </view>
 
