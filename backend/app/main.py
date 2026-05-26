@@ -1496,6 +1496,10 @@ async def auth_bind_login(request: BindLoginRequest, session: Session = Depends(
         session.refresh(user)
         logger.info(f"新用户注册: {account}, ID: {user.id}")
 
+    # --- 3.5 记录隐私协议同意时间 ---
+    if not user.privacy_consent_at:
+        user.privacy_consent_at = int(time.time() * 1000)
+
     # --- 4. 建立 / 更新 OpenID 绑定（直接写 user 表）---
     # 若此 openid 此前已绑定到其他用户，先清空旧绑定（一对一约束）
     old_user = session.exec(
@@ -2279,4 +2283,107 @@ async def update_scale_member(member_id: int, request: FamilyMemberRequest, sess
         session.rollback()
         logger.error(f"Failed to update member: {e}")
         raise HTTPException(status_code=500, detail=f"修改失败：{str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# 账号管理与隐私合规 API
+# ---------------------------------------------------------------------------
+
+class ChangePasswordRequest(BaseModel):
+    user_id: int
+    password: str
+
+@app.post("/api/auth/change-password")
+async def change_password(request: ChangePasswordRequest, session: Session = Depends(get_session)):
+    """修改用户密码"""
+    try:
+        new_password = request.password.strip()
+        if not new_password or len(new_password) < 6:
+            raise HTTPException(status_code=400, detail="密码长度不能少于6位")
+
+        user = session.get(User, request.user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+        user.password_hash = hash_password(new_password)
+        user.updated_at = int(time.time() * 1000)
+        session.add(user)
+        session.commit()
+
+        logger.info(f"密码修改成功: user_id={request.user_id}")
+        return {"status": "success", "message": "密码修改成功"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"修改密码失败：{str(e)}")
+
+
+class DeleteAccountRequest(BaseModel):
+    user_id: int
+
+@app.post("/api/auth/delete-account")
+async def delete_account(request: DeleteAccountRequest, session: Session = Depends(get_session)):
+    """注销账号：删除用户及所有相关数据"""
+    try:
+        user_id = request.user_id
+        user = session.get(User, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+        logger.warning(f"开始注销账号: user_id={user_id}, phone={user.phone_number}")
+
+        # 1. 删除所有体重记录
+        weight_stmt = select(WeightRecord).where(WeightRecord.user_id == user_id)
+        weight_records = session.exec(weight_stmt).all()
+        for record in weight_records:
+            session.delete(record)
+        logger.info(f"已删除 {len(weight_records)} 条体重记录")
+
+        # 2. 删除所有家庭成员
+        member_stmt = select(FamilyMember).where(FamilyMember.user_id == user_id)
+        members = session.exec(member_stmt).all()
+        for member in members:
+            session.delete(member)
+        logger.info(f"已删除 {len(members)} 个家庭成员")
+
+        # 3. 删除所有设备配置
+        config_stmt = select(SystemConfig).where(SystemConfig.user_id == user_id)
+        configs = session.exec(config_stmt).all()
+        for cfg in configs:
+            session.delete(cfg)
+        logger.info(f"已删除 {len(configs)} 条配置")
+
+        # 4. 删除分享记录（作为分享者和被分享者）
+        from .models.models import DeviceShare, SharedDeviceConfig
+        share_stmt = select(DeviceShare).where(
+            (DeviceShare.from_user_id == user_id) | (DeviceShare.to_user_id == user_id)
+        )
+        shares = session.exec(share_stmt).all()
+        for share in shares:
+            # 删除分享的配置映射
+            sub_stmt = select(SharedDeviceConfig).where(SharedDeviceConfig.share_id == share.id)
+            sub_configs = session.exec(sub_stmt).all()
+            for sc in sub_configs:
+                session.delete(sc)
+            session.delete(share)
+        logger.info(f"已删除 {len(shares)} 条分享记录")
+
+        # 5. 删除用户本身
+        session.delete(user)
+        session.commit()
+
+        logger.warning(f"账号已完全注销: user_id={user_id}")
+        return {
+            "status": "success",
+            "message": "账号已成功注销，所有数据已永久删除",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        logger.error(f"注销失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"注销失败：{str(e)}")
 

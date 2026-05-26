@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS user (
     gender VARCHAR(10) DEFAULT 'male',                  -- 性别：male/female
     age INT DEFAULT 25,                                 -- 年龄
     height INT DEFAULT 175,                             -- 身高（cm）
+    privacy_consent_at BIGINT DEFAULT NULL,              -- 隐私协议同意时间戳（毫秒）
     created_at BIGINT NOT NULL,                         -- 创建时间戳（毫秒）
     updated_at BIGINT NOT NULL,                         -- 更新时间戳（毫秒）
     

@@ -19,6 +19,7 @@ class User(SQLModel, table=True):
     gender: str = Field(default="male", max_length=10)  # male/female
     age: int = Field(default=25)
     height: int = Field(default=175)  # cm
+    privacy_consent_at: Optional[int] = Field(default=None, sa_column=Column(BIGINT))  # 隐私协议同意时间戳（毫秒）
     created_at: int = Field(default_factory=lambda: int(time.time() * 1000), sa_column=Column(BIGINT, nullable=False))
     updated_at: int = Field(default_factory=lambda: int(time.time() * 1000), sa_column=Column(BIGINT, nullable=False))
 

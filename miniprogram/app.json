@@ -5,7 +5,9 @@
     "pages/config/config",
     "pages/feeder/feeder",
     "pages/litterbox/litterbox",
-    "pages/scale/scale"
+    "pages/scale/scale",
+    "pages/settings/settings",
+    "pages/privacy/privacy"
   ],
   "window": {
     "backgroundTextStyle": "light",

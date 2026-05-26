@@ -1,24 +1,24 @@
 const cloudRequest = require('../../utils/cloud_request.js');
 
-/**
- * 手机号脱敏：保留前3后4，中间4位变星号
- * @param {string} phone - 11位手机号
- * @returns {string} 脱敏后字符串
- */
+/** 隐私协议存储键名 */
+const PRIVACY_CONSENT_KEY = 'privacy_consent';
+
 function maskPhone(phone) {
   if (!phone || phone.length < 7) return phone || '';
   return phone.slice(0, 3) + '****' + phone.slice(-4);
 }
 
 /**
- * 登录模式枚举
- * loading      - 静默登录中（显示加载）
- * select       - 登录方式选择（显示两个按钮）
- * own_password - 本账号密码登录（仅需输入密码）
- * bind         - 其他手机号绑定（需输入手机号+密码）
+ * 模式枚举
+ * loading       - 静默登录中
+ * phone_only    - 首次登录：仅展示「手机号注册/登录」
+ * select        - 退出后重入：展示「本机登录」+「其他方式登录」
+ * own_password  - 本账号密码输入
+ * bind          - 其他手机号绑定输入
  */
 const MODE = {
   LOADING: 'loading',
+  PHONE_ONLY: 'phone_only',
   SELECT: 'select',
   OWN_PASSWORD: 'own_password',
   BIND: 'bind',
@@ -26,29 +26,36 @@ const MODE = {
 
 Page({
   data: {
-    // 当前模式
     loginMode: MODE.LOADING,
 
-    // 本账号密码登录
-    ownAccount: '',          // 原始手机号（用于提交）
-    ownAccountDisplay: '',   // 界面显示值（自动填充时脱敏）
-    isPhoneAutoFilled: false,// 是否系统自动填充
+    // 首次手机号注册/登录
+    phoneOnly: '',
+    phoneOnlyPassword: '',
+
+    // 本账号密码登录（退出后重入）
+    ownAccount: '',
+    ownAccountDisplay: '',
+    isPhoneAutoFilled: false,
     ownPassword: '',
 
     // 其他手机号绑定登录
     account: '',
     password: '',
 
-    // 通用状态
     loading: false,
     errorMsg: '',
 
-    // 上次退出的手机号
     lastLogoutPhone: '',
     lastLogoutPhoneDisplay: '',
 
-    // 是否允许下拉触发静默登录（仅 select 模式且有权限时）
-    canPullDownSilent: false,
+    // 隐私协议弹窗
+    showPrivacyDialog: false,
+    agreed: false,
+
+    // 底部行内协议校验
+    inlineAgreed: false,
+    privacyError: false,
+    privacyShaking: false,
   },
 
   onLoad(query) {
@@ -56,37 +63,130 @@ Page({
     const forcedMode = query.mode;
     const lastPhone = wx.getStorageSync('lastLogoutPhone') || '';
 
+    // 1. 检查隐私协议是否已授权
+    if (!wx.getStorageSync(PRIVACY_CONSENT_KEY)) {
+      this.setData({
+        loginMode: MODE.LOADING,
+        showPrivacyDialog: true,
+        agreed: false,
+      });
+      return;
+    }
+
+    // 2. 已授权 → 区分首次登录 vs 退出后重入
     if (isFromLogout) {
-      // 来自退出登录
       this.handlePostLogout(lastPhone);
     } else if (forcedMode === 'own_password') {
-      // app.js 检测到 preventSilentLogin，强制进入本账号密码模式
       this.startOwnPasswordMode(lastPhone);
+    } else if (forcedMode === 'phone_only') {
+      this.startPhoneOnlyMode();
+    } else if (lastPhone) {
+      // 有退出记录 → 展示双选项
+      this.showLoginSelect('', lastPhone);
     } else {
-      // 正常打开：先尝试静默登录
+      // 无退出记录 → 首次登录 → 尝试静默登录，失败后进入 phone_only
       this.attemptSilentLogin();
     }
   },
 
-  // ==================== 模式切换 ====================
+  // ==================== 隐私协议弹窗 ====================
+
+  showPrivacyDialog() {
+    this.setData({ showPrivacyDialog: true, agreed: false });
+  },
+
+  toggleAgree() {
+    this.setData({ agreed: !this.data.agreed });
+  },
+
+  viewAgreement() {
+    wx.navigateTo({ url: '/pages/privacy/privacy?tab=service' });
+  },
+
+  viewPolicy() {
+    wx.navigateTo({ url: '/pages/privacy/privacy?tab=privacy' });
+  },
+
+  confirmPrivacy() {
+    if (!this.data.agreed) {
+      wx.showToast({ title: '请先阅读并同意协议', icon: 'none' });
+      return;
+    }
+    wx.setStorageSync(PRIVACY_CONSENT_KEY, Date.now());
+    this.setData({ showPrivacyDialog: false });
+
+    // 同意后恢复正常流程
+    const lastPhone = wx.getStorageSync('lastLogoutPhone') || '';
+    if (lastPhone) {
+      this.showLoginSelect('', lastPhone);
+    } else {
+      this.startPhoneOnlyMode();
+    }
+  },
+
+  rejectPrivacy() {
+    wx.showModal({
+      title: '提示',
+      content: '您需要同意《冷门器灵服务协议》和《隐私政策》后才能使用本小程序。',
+      confirmText: '我知道了',
+      showCancel: false,
+      success: () => { wx.navigateBack(); },
+    });
+  },
+
+  // ==================== 底部行内协议校验 ====================
+
+  toggleInlineAgree() {
+    this.setData({
+      inlineAgreed: !this.data.inlineAgreed,
+      privacyError: false,
+      privacyShaking: false,
+    });
+  },
 
   /**
-   * 退出登录后的处理：检查 preventSilentLogin 标志决定模式
+   * 统一的登录前协议校验
+   * @returns {boolean} true=通过
    */
+  checkPrivacyBeforeLogin() {
+    if (!this.data.inlineAgreed) {
+      this.setData({
+        privacyError: true,
+        privacyShaking: true,
+      });
+      // 抖动动画结束后移除 shake 类
+      setTimeout(() => {
+        this.setData({ privacyShaking: false });
+      }, 600);
+      return false;
+    }
+    return true;
+  },
+
+  // ==================== 模式切换 ====================
+
   handlePostLogout(lastPhone) {
     const preventSilent = wx.getStorageSync('preventSilentLogin');
     if (preventSilent) {
-      // 用户之前选了"本账号密码登录" → 直接进入该模式
       this.startOwnPasswordMode(lastPhone);
     } else {
-      // 未禁止静默登录 → 显示登录方式选择
       this.showLoginSelect('', lastPhone);
     }
   },
 
-  /**
-   * 尝试静默免密登录
-   */
+  /** 首次登录：仅展示手机号注册/登录 */
+  startPhoneOnlyMode() {
+    this.setData({
+      loginMode: MODE.PHONE_ONLY,
+      phoneOnly: '',
+      phoneOnlyPassword: '',
+      loading: false,
+      errorMsg: '',
+      inlineAgreed: false,
+      privacyError: false,
+    });
+  },
+
   async attemptSilentLogin() {
     this.setData({ loginMode: MODE.LOADING, errorMsg: '', loading: false });
     try {
@@ -100,31 +200,21 @@ Page({
         method: 'POST',
         data: { code: loginRes.code },
       });
-
-      // 静默登录成功
       this.onLoginSuccess(res);
     } catch (err) {
       const sc = err?.statusCode;
       const detail = err?.data?.detail || '';
-
       if (sc === 401 || (detail && detail.code === 'UNBOUND')) {
-        this.showLoginSelect('请选择登录方式');
-      } else if (sc === 400) {
-        this.showLoginSelect('登录凭证失效，请下拉重试');
+        // 未绑定 → 进入首次手机号注册/登录
+        this.startPhoneOnlyMode();
       } else {
-        this.showLoginSelect('网络异常，请下拉重试');
+        this.setData({ errorMsg: '网络异常，请重试' });
+        setTimeout(() => this.startPhoneOnlyMode(), 500);
       }
     }
   },
 
-  /**
-   * 显示登录方式选择
-   * @param {string} msg - 提示信息
-   * @param {string} lastPhone - 上次手机号
-   * @param {boolean} force - 是否强制显示选择页（跳过 preventSilentLogin 拦截）
-   */
   showLoginSelect(msg, lastPhone, force) {
-    // 非强制时检查 preventSilentLogin → 拦截并回到本账号密码模式
     if (!force) {
       const preventSilent = wx.getStorageSync('preventSilentLogin');
       if (preventSilent) {
@@ -140,24 +230,17 @@ Page({
       lastLogoutPhone: phone,
       lastLogoutPhoneDisplay: maskPhone(phone),
       ownAccount: phone,
-      // 未禁止静默登录时才显示下拉/按钮入口
       canPullDownSilent: !preventSilent,
+      inlineAgreed: false,
+      privacyError: false,
     });
   },
 
-  /**
-   * 选择：本账号密码登录
-   * 传递原始手机号（若有），由 startOwnPasswordMode 决定是否脱敏
-   */
   onSelectOwnPassword() {
     const phone = this.data.ownAccount || this.data.lastLogoutPhone;
     this.startOwnPasswordMode(phone);
   },
 
-  /**
-   * 进入本账号密码登录模式
-   * @param {string} phone - 手机号（自动填充时传入原始号码，手动进入时传空）
-   */
   startOwnPasswordMode(phone) {
     const isAuto = !!phone && phone.length >= 7;
     this.setData({
@@ -169,13 +252,11 @@ Page({
       loading: false,
       errorMsg: '',
       canPullDownSilent: false,
+      inlineAgreed: this.data.inlineAgreed,
+      privacyError: false,
     });
   },
 
-  /**
-   * 选择：其他手机号登录
-   * 用户主动选择使用其他账号 → 清除 preventSilentLogin 标志，允许后续静默登录
-   */
   onSelectOtherPhone() {
     wx.setStorageSync('preventSilentLogin', false);
     this.setData({
@@ -185,13 +266,11 @@ Page({
       loading: false,
       errorMsg: '',
       canPullDownSilent: false,
+      inlineAgreed: false,
+      privacyError: false,
     });
   },
 
-  /**
-   * 返回选择页（用户主动操作 → 强制展示 + 清除 preventSilentLogin，
-   * 允许后续下拉静默登录）
-   */
   onBackToSelect() {
     wx.setStorageSync('preventSilentLogin', false);
     this.showLoginSelect('', '', true);
@@ -199,11 +278,39 @@ Page({
 
   // ==================== 提交登录 ====================
 
-  /**
-   * 本账号密码登录提交
-   * 登录后设置 preventSilentLogin = true，禁止后续静默登录
-   */
+  /** 首次手机号注册/登录 */
+  async handlePhoneOnlyLogin() {
+    if (!this.checkPrivacyBeforeLogin()) return;
+    const { phoneOnly, phoneOnlyPassword } = this.data;
+    if (!phoneOnly || phoneOnly.length !== 11) {
+      this.setData({ errorMsg: '请输入正确的11位手机号' });
+      return;
+    }
+    if (!phoneOnlyPassword || phoneOnlyPassword.length < 4) {
+      this.setData({ errorMsg: '密码至少4位' });
+      return;
+    }
+    this.setData({ loading: true, errorMsg: '' });
+    try {
+      const loginRes = await new Promise((resolve, reject) => {
+        wx.login({ success: resolve, fail: reject });
+      });
+      if (!loginRes.code) throw new Error('获取微信凭证失败');
+
+      const res = await cloudRequest.callContainer({
+        path: '/api/auth/bind',
+        method: 'POST',
+        data: { account: phoneOnly, password: phoneOnlyPassword, code: loginRes.code },
+      });
+      wx.setStorageSync('preventSilentLogin', true);
+      this.onLoginSuccess(res);
+    } catch (err) {
+      this._handleLoginError(err);
+    }
+  },
+
   async handleOwnPasswordLogin() {
+    if (!this.checkPrivacyBeforeLogin()) return;
     const { ownAccount, ownPassword } = this.data;
     if (!ownAccount || ownAccount.length !== 11) {
       this.setData({ errorMsg: '手机号不正确' });
@@ -225,8 +332,6 @@ Page({
         method: 'POST',
         data: { account: ownAccount, password: ownPassword, code: loginRes.code },
       });
-
-      // ✅ 本账号密码登录成功 → 禁止后续 openid 静默登录
       wx.setStorageSync('preventSilentLogin', true);
       this.onLoginSuccess(res);
     } catch (err) {
@@ -234,11 +339,8 @@ Page({
     }
   },
 
-  /**
-   * 其他手机号绑定提交
-   * 登录后清除 preventSilentLogin，允许使用 openid 静默登录
-   */
   async handleBindLogin() {
+    if (!this.checkPrivacyBeforeLogin()) return;
     const { account, password } = this.data;
     if (account.length !== 11) {
       this.setData({ errorMsg: '请输入正确的11位手机号' });
@@ -260,8 +362,6 @@ Page({
         method: 'POST',
         data: { account, password, code: loginRes.code },
       });
-
-      // ✅ 其他手机号绑定成功 → 清除禁止标志，允许后续静默登录
       wx.setStorageSync('preventSilentLogin', false);
       wx.setStorageSync('lastLogoutPhone', '');
       this.onLoginSuccess(res);
@@ -270,20 +370,16 @@ Page({
     }
   },
 
-  /**
-   * 统一错误处理
-   */
   _handleLoginError(err) {
     const sc = err?.statusCode;
     const detail = err?.data?.detail || '';
     const errMsg = err?.errMsg || err?.message || JSON.stringify(err);
-
     let msg = '';
     if (sc === 401) {
       msg = '手机号或密码错误';
     } else if (sc === 400) {
       msg = typeof detail === 'string' ? detail : '参数有误';
-    } else if (errMsg.includes('CONNECTION_RESET')) {
+    } else if (errMsg.includes('CONNECTION_RESET') || errMsg.includes('network')) {
       msg = '无法连接服务器，请确保后端已启动';
     } else if (errMsg.includes('timeout')) {
       msg = '请求超时，请检查服务器是否正常';
@@ -293,9 +389,6 @@ Page({
     this.setData({ errorMsg: msg, loading: false });
   },
 
-  /**
-   * 登录成功统一处理
-   */
   onLoginSuccess(res) {
     const { token, user_id, phone_number, openid, nickname } = res;
     wx.setStorageSync('token', token);
@@ -306,25 +399,16 @@ Page({
       nickname: nickname || `用户${phone_number.slice(-4)}`,
     });
     console.log('[Login] ✅ 登录成功，user_id:', user_id);
-    // 用全屏 loading 遮罩覆盖页面切换白屏
     wx.showLoading({ title: '正在进入…', mask: true });
     wx.reLaunch({ url: '/pages/index/index' });
   },
 
-  // ==================== 下拉刷新 ====================
+  // ==================== 静默登录 ====================
 
-  /**
-   * 手动触发静默登录（select 模式下的按钮入口）
-   */
   onSilentLogin() {
     this._performSilentLoginWithPullDown();
   },
 
-  /**
-   * 下拉刷新：
-   * - 处于 select 模式且未禁止静默登录 → 触发 openid 静默登录
-   * - 其他情况 → 仅停止刷新
-   */
   onPullDownRefresh() {
     if (this.data.loginMode === MODE.SELECT) {
       const preventSilent = wx.getStorageSync('preventSilentLogin');
@@ -336,9 +420,6 @@ Page({
     wx.stopPullDownRefresh();
   },
 
-  /**
-   * 下拉触发的静默登录（内部包装，处理 stopPullDownRefresh）
-   */
   async _performSilentLoginWithPullDown() {
     try {
       const loginRes = await new Promise((resolve, reject) => {
@@ -351,7 +432,6 @@ Page({
         method: 'POST',
         data: { code: loginRes.code },
       });
-
       wx.hideLoading();
       wx.stopPullDownRefresh();
       this.onLoginSuccess(res);
@@ -370,33 +450,21 @@ Page({
 
   // ==================== 输入事件 ====================
 
-  /**
-   * 本账号输入框获得焦点
-   * 自动填充态 → 清除脱敏值，切换为手动输入
-   */
+  onPhoneOnlyInput(e) { this.setData({ phoneOnly: e.detail.value }); },
+  onPhoneOnlyPasswordInput(e) { this.setData({ phoneOnlyPassword: e.detail.value }); },
+
   onOwnAccountFocus() {
     if (this.data.isPhoneAutoFilled) {
-      this.setData({
-        ownAccount: '',
-        ownAccountDisplay: '',
-        isPhoneAutoFilled: false,
-      });
+      this.setData({ ownAccount: '', ownAccountDisplay: '', isPhoneAutoFilled: false });
     }
   },
-
-  /**
-   * 本账号输入
-   * 自动填充清除后进入手动输入态，正常显示明文
-   */
   onOwnAccountInput(e) {
     const val = e.detail.value;
-    this.setData({
-      ownAccount: val,
-      ownAccountDisplay: val,
-    });
+    this.setData({ ownAccount: val, ownAccountDisplay: val });
   },
-
   onOwnPasswordInput(e) { this.setData({ ownPassword: e.detail.value }); },
   onAccountInput(e) { this.setData({ account: e.detail.value }); },
   onPasswordInput(e) { this.setData({ password: e.detail.value }); },
+
+  stopPropagation() {},
 });

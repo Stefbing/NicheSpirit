@@ -597,10 +597,10 @@ Page({
   // 阻止事件冒泡
   stopPropagation() {},
 
-  // 跳转到配置页面
+  // 跳转到设置页面
   goToConfig() {
     wx.navigateTo({
-      url: '/pages/config/config'
+      url: '/pages/settings/settings'
     })
   },
 

@@ -1,0 +1,124 @@
+<view class="page">
+  <view class="bg-orb bg-orb-1"></view>
+  <view class="bg-orb bg-orb-2"></view>
+  <view class="bg-orb bg-orb-3"></view>
+
+  <!-- 用户头像与信息 -->
+  <view class="profile-card">
+    <view class="avatar">{{avatarChar}}</view>
+    <view class="profile-info">
+      <text class="profile-name">{{nickname || '用户'}}</text>
+      <text class="profile-phone">{{phoneDisplay}}</text>
+    </view>
+  </view>
+
+  <view class="settings-list">
+
+    <!-- ====== 功能区一：账号信息维护与注销区 ====== -->
+    <view class="section-header">
+      <text class="section-icon">🔐</text>
+      <text class="section-title">账号信息维护与注销区</text>
+    </view>
+
+    <view class="section-cards">
+      <!-- 修改密码 -->
+      <view class="setting-card" bindtap="onChangePassword">
+        <view class="card-left">
+          <view class="icon-wrap" style="background: rgba(102, 126, 234, 0.15);">
+            <text class="icon-text">🔑</text>
+          </view>
+          <view class="card-body">
+            <text class="card-title">修改密码</text>
+            <text class="card-desc">更新您的登录密码</text>
+          </view>
+        </view>
+        <text class="card-arrow">›</text>
+      </view>
+
+      <!-- 查看隐私协议 -->
+      <view class="setting-card" bindtap="onViewPrivacy">
+        <view class="card-left">
+          <view class="icon-wrap" style="background: rgba(118, 75, 162, 0.15);">
+            <text class="icon-text">📄</text>
+          </view>
+          <view class="card-body">
+            <text class="card-title">隐私协议</text>
+            <text class="card-desc">查看《用户服务协议》与《隐私保护政策》</text>
+          </view>
+        </view>
+        <text class="card-arrow">›</text>
+      </view>
+
+      <!-- 注销账号（红色警示） -->
+      <view class="setting-card danger-card" bindtap="onDeleteAccount">
+        <view class="card-left">
+          <view class="icon-wrap" style="background: rgba(255, 77, 79, 0.15);">
+            <text class="icon-text">🗑️</text>
+          </view>
+          <view class="card-body">
+            <text class="card-title card-title-danger">注销账号</text>
+            <text class="card-desc card-desc-danger">永久删除账号及所有数据，不可恢复</text>
+          </view>
+        </view>
+        <text class="card-arrow card-arrow-danger">›</text>
+      </view>
+    </view>
+
+    <!-- ====== 功能区二：各设备账号维护区 ====== -->
+    <view class="section-header">
+      <text class="section-icon">📱</text>
+      <text class="section-title">各设备账号维护区</text>
+    </view>
+
+    <view class="section-cards">
+      <block wx:for="{{deviceList}}" wx:key="platform">
+        <view class="setting-card" bindtap="onEditDeviceConfig" data-platform="{{item.platform}}">
+          <view class="card-left">
+            <view class="icon-wrap" style="background: {{item.iconBg}};">
+              <text class="icon-text">{{item.icon}}</text>
+            </view>
+            <view class="card-body">
+              <text class="card-title">{{item.label}}</text>
+              <text class="card-desc" wx:if="{{item.configured}}">已配置 - {{item.maskedAccount}}</text>
+              <text class="card-desc" wx:else>未配置，点击添加账号</text>
+            </view>
+          </view>
+          <text class="card-arrow">›</text>
+        </view>
+      </block>
+    </view>
+
+    <!-- ====== 功能区三：小程序用途简介区 ====== -->
+    <view class="section-header">
+      <text class="section-icon">ℹ️</text>
+      <text class="section-title">小程序用途简介区</text>
+    </view>
+
+    <view class="about-card">
+      <view class="about-item">
+        <text class="about-label">小程序名称</text>
+        <text class="about-value">冷门器灵</text>
+      </view>
+      <view class="about-divider"></view>
+      <view class="about-item">
+        <text class="about-label">版本号</text>
+        <text class="about-value">v0.5.0</text>
+      </view>
+      <view class="about-divider"></view>
+      <view class="about-item">
+        <text class="about-label">功能概述</text>
+        <text class="about-value about-desc">一站式智能家居控制中心，支持云宠喂食机远程投喂与计划管理、小佩猫厕所状态监控与清理控制、小米体脂秤蓝牙测量与健康数据分析。通过统一平台管理多品牌智能设备，为您提供便捷的宠物照护与个人健康管理体验。</text>
+      </view>
+      <view class="about-divider"></view>
+      <view class="about-item">
+        <text class="about-label">支持设备</text>
+        <text class="about-value about-desc">• 云宠（CloudPets）智能喂食机\n• 小佩（PetKit）智能猫厕所（T3/T4/T5）\n• 小米体脂秤 2（XMTZC05HM）</text>
+      </view>
+      <view class="about-divider"></view>
+      <view class="about-item">
+        <text class="about-label">注意事项</text>
+        <text class="about-value about-desc">• 体脂秤测量数据仅供参考，不构成医疗建议\n• 设备控制依赖第三方API，请确保网络畅通\n• 如遇问题请尝试重新登录或联系客服</text>
+      </view>
+    </view>
+  </view>
+</view>
