@@ -31,6 +31,7 @@ Page({
       wx.reLaunch({ url: '/pages/login/login' });
       return;
     }
+    this.setData({ userInfo });
 
     this.updateGreeting();
     this.loadUserDevices();
@@ -627,6 +628,7 @@ Page({
           
           wx.removeStorageSync('userInfo')
           wx.removeStorageSync('token')
+          wx.removeStorageSync('preventSilentLogin')
           this.setData({ 
             userInfo: null,
             userDevices: [],

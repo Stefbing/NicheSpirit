@@ -40,6 +40,7 @@ Page({
     password: '',
 
     loading: false,
+    loadingText: '',
     errorMsg: '',
 
     lastLogoutPhone: '',
@@ -86,19 +87,68 @@ Page({
     const forcedMode = query.mode;
     const lastPhone = wx.getStorageSync('lastLogoutPhone') || '';
 
-    // 区分首次登录 vs 退出后重入
+    // 退出登录：跳过加载动画，直接展示选择页
     if (isFromLogout) {
       this.handlePostLogout(lastPhone);
-    } else if (forcedMode === 'own_password') {
+      return;
+    }
+
+    // app.js 指定的强制模式：跳过加载动画
+    if (forcedMode === 'own_password') {
       this.startOwnPasswordMode(lastPhone);
-    } else if (forcedMode === 'phone_only') {
+      return;
+    }
+    if (forcedMode === 'phone_only') {
       this.startPhoneOnlyMode();
-    } else if (lastPhone) {
-      // 有退出记录 → 展示双选项
-      this.showLoginSelect('', lastPhone);
-    } else {
-      // 无退出记录 → 首次登录 → 尝试静默登录，失败后进入 phone_only
-      this.attemptSilentLogin();
+      return;
+    }
+
+    // 默认流程：显示加载动画 → 后台静默登录检测 → 分流
+    this.setData({ loginMode: MODE.LOADING, errorMsg: '' });
+    this.performSilentLoginCheck();
+  },
+
+  /**
+   * 静默登录检测：展示加载动画期间执行后台绑定校验
+   * 已绑定 → 自动登录跳转首页
+   * 未绑定/退出/过期 → 停留在登录页展示选择页
+   */
+  async performSilentLoginCheck() {
+    try {
+      const loginRes = await new Promise((resolve, reject) => {
+        wx.login({ success: resolve, fail: reject });
+      });
+      if (!loginRes.code) throw new Error('获取微信凭证失败');
+
+      const res = await cloudRequest.callContainer({
+        path: '/api/auth/silent-login',
+        method: 'POST',
+        data: { code: loginRes.code },
+      });
+
+      // 已绑定 → 静默登录成功 → 无缝跳转首页
+      this.onLoginSuccess(res);
+    } catch (err) {
+      const sc = err?.statusCode;
+      const detail = err?.data?.detail || '';
+
+      if (sc === 401 || (detail && detail.code === 'UNBOUND')) {
+        // 未绑定/已退出 → 展示登录选择页
+        const lastPhone = wx.getStorageSync('lastLogoutPhone') || '';
+        if (lastPhone) {
+          this.showLoginSelect('', lastPhone);
+        } else {
+          this.startPhoneOnlyMode();
+        }
+      } else {
+        // 网络错误 → 降级展示
+        const lastPhone = wx.getStorageSync('lastLogoutPhone') || '';
+        if (lastPhone) {
+          this.showLoginSelect('网络异常，请重试', lastPhone);
+        } else {
+          this.startPhoneOnlyMode();
+        }
+      }
     }
   },
 
@@ -162,12 +212,8 @@ Page({
   // ==================== 模式切换 ====================
 
   handlePostLogout(lastPhone) {
-    const preventSilent = wx.getStorageSync('preventSilentLogin');
-    if (preventSilent) {
-      this.startOwnPasswordMode(lastPhone);
-    } else {
-      this.showLoginSelect('', lastPhone);
-    }
+    // 退出登录后始终展示登录方式选择页，不自动跳转本机登录
+    this.showLoginSelect('', lastPhone, true);
   },
 
   /** 首次登录：仅展示手机号注册/登录 */
@@ -177,6 +223,7 @@ Page({
       phoneOnly: '',
       phoneOnlyPassword: '',
       loading: false,
+      loadingText: '',
       errorMsg: '',
       inlineAgreed: false,
       privacyError: false,
@@ -286,7 +333,21 @@ Page({
       this.setData({ errorMsg: '密码至少4位' });
       return;
     }
-    this.setData({ loading: true, errorMsg: '' });
+
+    // 先查询手机号是否已注册，决定显示"登录中"还是"注册中"
+    let isExisting = false;
+    try {
+      const checkRes = await cloudRequest.callContainer({
+        path: `/api/auth/check-phone?phone=${phoneOnly}`,
+        method: 'GET',
+      });
+      isExisting = checkRes.exists === true;
+    } catch (err) {
+      // 查询失败时默认为注册流程
+      console.warn('[Login] 检查手机号状态失败，默认注册流程:', err);
+    }
+
+    this.setData({ loading: true, errorMsg: '', loadingText: isExisting ? '登录中…' : '注册中…' });
     try {
       const loginRes = await new Promise((resolve, reject) => {
         wx.login({ success: resolve, fail: reject });

@@ -82,8 +82,9 @@ App({
     const preventSilentLogin = wx.getStorageSync('preventSilentLogin');
 
     if (userInfo && userInfo.user_id && token) {
-      // 已有登录态 → 直接初始化蓝牙
+      // 已有登录态 → 跳转首页 + 初始化蓝牙
       console.log('[App] 已有登录态，user_id:', userInfo.user_id);
+      wx.reLaunch({ url: '/pages/index/index' });
       setTimeout(() => {
         this.checkAndInitBluetooth(userInfo.user_id);
       }, 500);
@@ -97,56 +98,8 @@ App({
       return;
     }
 
-    // 无登录态 → 尝试静默免密登录
-    console.log('[App] 无登录态，尝试静默登录…');
-    try {
-      const loginRes = await new Promise((resolve, reject) => {
-        wx.login({
-          success: resolve,
-          fail: reject,
-        });
-      });
-
-      if (!loginRes.code) {
-        throw new Error('wx.login 失败');
-      }
-
-      const res = await new Promise((resolve, reject) => {
-        cloudRequest.callContainer({
-          path: '/api/auth/silent-login',
-          method: 'POST',
-          data: { code: loginRes.code },
-          success: resolve,
-          fail: reject,
-        });
-      });
-
-      // 静默登录成功 → 保存信息 + 初始化蓝牙
-      wx.setStorageSync('token', res.token);
-      wx.setStorageSync('userInfo', {
-        user_id: res.user_id,
-        phone_number: res.phone_number,
-        openid: res.openid,
-        nickname: res.nickname || `用户${res.phone_number.slice(-4)}`,
-      });
-      console.log('[App] ✅ 静默登录成功，user_id:', res.user_id);
-
-      setTimeout(() => {
-        this.checkAndInitBluetooth(res.user_id);
-      }, 500);
-    } catch (err) {
-      const statusCode = err?.statusCode;
-      const detail = err?.data?.detail || '';
-      console.log('[App] 静默登录失败:', statusCode, detail);
-
-      if (statusCode === 401 || (detail && detail.code === 'UNBOUND')) {
-        // 未绑定 → 跳转登录页
-        wx.reLaunch({ url: '/pages/login/login' });
-      } else {
-        // 网络或其他错误 → 也跳转登录页（用户可手动重试）
-        wx.reLaunch({ url: '/pages/login/login' });
-      }
-    }
+    // 无登录态 → 由登录页自行处理静默登录检测与分流
+    console.log('[App] 无登录态，等待登录页进行静默登录检测');
   },
 
   /**

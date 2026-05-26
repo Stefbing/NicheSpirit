@@ -94,12 +94,12 @@ Page({
     wx.showModal({
       title: '修改密码',
       editable: true,
-      placeholderText: '请输入新密码（至少6位）',
+      placeholderText: '请输入新密码（至少4位）',
       success: async (res) => {
         if (res.confirm && res.content) {
           const newPassword = res.content.trim();
-          if (newPassword.length < 6) {
-            wx.showToast({ title: '密码至少6位', icon: 'none' });
+          if (newPassword.length < 4) {
+            wx.showToast({ title: '密码至少4位', icon: 'none' });
             return;
           }
           await this.doChangePassword(newPassword);

@@ -38,8 +38,8 @@
         <view class="input-group">
           <view class="input-row">
             <text class="input-icon">📱</text>
-            <input class="login-input" type="text" maxlength="11" placeholder="请输入手机号"
-                   value="{{phoneOnly}}" bindinput="onPhoneOnlyInput" />
+<input class="login-input" type="number" maxlength="11" placeholder="请输入手机号"
+               value="{{phoneOnly}}" bindinput="onPhoneOnlyInput" />
           </view>
           <view class="input-row">
             <text class="input-icon">🔒</text>
@@ -51,7 +51,7 @@
         <button class="submit-btn {{loading || !phoneOnly || phoneOnly.length !== 11 || !phoneOnlyPassword || phoneOnlyPassword.length < 4 ? 'disabled' : ''}}"
                 bindtap="handlePhoneOnlyLogin"
                 disabled="{{loading || !phoneOnly || phoneOnly.length !== 11 || !phoneOnlyPassword || phoneOnlyPassword.length < 4}}">
-          <text class="btn-text">{{loading ? '注册中…' : '注册/登录'}}</text>
+          <text class="btn-text">{{loading ? loadingText : '注册/登录'}}</text>
         </button>
 
         <view class="error-msg" wx:if="{{errorMsg}}">{{errorMsg}}</view>
@@ -111,7 +111,7 @@
         <view class="input-group">
           <view class="input-row {{isPhoneAutoFilled ? 'auto-filled' : ''}}">
             <text class="input-icon">📱</text>
-            <input class="login-input" type="text" maxlength="11" placeholder="请输入手机号"
+            <input class="login-input" type="number" maxlength="11" placeholder="请输入手机号"
                    value="{{ownAccountDisplay}}"
                    bindfocus="onOwnAccountFocus" bindinput="onOwnAccountInput" />
             <text class="auto-fill-tip" wx:if="{{isPhoneAutoFilled}}">可修改</text>

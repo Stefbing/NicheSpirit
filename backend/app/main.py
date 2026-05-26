@@ -1454,8 +1454,8 @@ async def auth_bind_login(request: BindLoginRequest, session: Session = Depends(
     # --- 1. 参数校验 ---
     if not account or len(account) != 11 or not account.isdigit():
         raise HTTPException(status_code=400, detail="请输入正确的11位手机号")
-    if not password or len(password) < 6:
-        raise HTTPException(status_code=400, detail="密码长度不能少于6位")
+    if not password or len(password) < 4:
+        raise HTTPException(status_code=400, detail="密码长度不能少于4位")
     if not code:
         raise HTTPException(status_code=400, detail="缺少微信登录凭证")
 
@@ -2286,6 +2286,19 @@ async def update_scale_member(member_id: int, request: FamilyMemberRequest, sess
 
 
 # ---------------------------------------------------------------------------
+# 手机号注册状态查询 API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/auth/check-phone")
+async def check_phone_exists(phone: str, session: Session = Depends(get_session)):
+    """查询手机号是否已注册"""
+    if not phone or len(phone) != 11:
+        raise HTTPException(status_code=400, detail="请输入正确的11位手机号")
+    user = session.exec(select(User).where(User.phone_number == phone)).first()
+    return {"exists": user is not None}
+
+
+# ---------------------------------------------------------------------------
 # 账号管理与隐私合规 API
 # ---------------------------------------------------------------------------
 
@@ -2298,8 +2311,8 @@ async def change_password(request: ChangePasswordRequest, session: Session = Dep
     """修改用户密码"""
     try:
         new_password = request.password.strip()
-        if not new_password or len(new_password) < 6:
-            raise HTTPException(status_code=400, detail="密码长度不能少于6位")
+        if not new_password or len(new_password) < 4:
+            raise HTTPException(status_code=400, detail="密码长度不能少于4位")
 
         user = session.get(User, request.user_id)
         if not user:
