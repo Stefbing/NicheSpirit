@@ -180,27 +180,54 @@
 
 
 
-  <!-- ====== 底部弹窗：隐私协议授权（首次主动展示，也可行内触发） ====== -->
-  <view wx:if="{{showPrivacyDialog}}" class="privacy-mask" catchtouchmove="stopPropagation">
-    <view class="privacy-modal" catchtap="stopPropagation">
-      <view class="privacy-modal-body">
-        <view class="privacy-modal-title">隐私授权</view>
-        <view class="privacy-modal-check" bindtap="toggleAgree">
-          <view class="privacy-checkbox {{agreed ? 'checked' : ''}}">
-            <text class="check-icon" wx:if="{{agreed}}">✓</text>
+  <!-- ====== 协议/政策详情底部蒙层弹窗（覆盖底部+两侧，顶部留白） ====== -->
+  <view wx:if="{{showAgreementModal}}" class="agreement-mask {{agreementAnimatingOut ? 'fade-out' : ''}}" catchtouchmove="stopPropagation">
+    <!-- 顶部空白蒙层区域：点击关闭 -->
+    <view class="agreement-mask-top" bindtap="closeAgreementModal"></view>
+    <!-- 底部弹窗主体 -->
+    <view class="agreement-modal {{agreementAnimatingOut ? 'slide-down' : 'slide-in'}}" catchtap="stopPropagation">
+      <!-- 顶部栏 -->
+      <view class="agreement-header">
+        <view class="agreement-tabs">
+          <view class="agreement-tab {{agreementTab === 'service' ? 'active' : ''}}" data-tab="service" bindtap="switchAgreementTab">
+            <text class="agreement-tab-text">用户服务协议</text>
           </view>
-          <text class="privacy-modal-text">我已阅读并同意<text class="privacy-modal-link" catchtap="viewAgreement">《服务协议》</text>和<text class="privacy-modal-link" catchtap="viewPolicy">《隐私政策》</text>
-          </text>
+          <view class="agreement-tab {{agreementTab === 'privacy' ? 'active' : ''}}" data-tab="privacy" bindtap="switchAgreementTab">
+            <text class="agreement-tab-text">隐私保护政策</text>
+          </view>
+        </view>
+        <view class="agreement-close-btn" bindtap="closeAgreementModal">
+          <text class="close-icon">✕</text>
         </view>
       </view>
 
-      <view class="privacy-modal-actions">
-        <button class="modal-btn confirm-btn" bindtap="confirmPrivacy" disabled="{{!agreed}}">
-          同意并继续
-        </button>
-        <button class="modal-btn reject-btn" bindtap="rejectPrivacy">不同意</button>
-      </view>
+      <!-- 内容区 -->
+      <scroll-view class="agreement-content" scroll-y enhanced show-scrollbar="{{false}}">
+        <view wx:if="{{agreementTab === 'service'}}">
+          <view class="agreement-section-title">用户服务协议</view>
+          <view class="agreement-update">更新日期：2026年5月26日</view>
+          <view class="agreement-update">生效日期：2026年5月26日</view>
+          <block wx:for="{{serviceArticles}}" wx:key="index">
+            <view class="agreement-article">
+              <text class="agreement-article-title" wx:if="{{item.title}}">{{item.title}}</text>
+              <text class="agreement-article-text">{{item.text}}</text>
+            </view>
+          </block>
+        </view>
+        <view wx:else>
+          <view class="agreement-section-title">隐私保护政策</view>
+          <view class="agreement-update">更新日期：2026年5月26日</view>
+          <view class="agreement-update">生效日期：2026年5月26日</view>
+          <block wx:for="{{privacyArticles}}" wx:key="index">
+            <view class="agreement-article">
+              <text class="agreement-article-title" wx:if="{{item.title}}">{{item.title}}</text>
+              <text class="agreement-article-text">{{item.text}}</text>
+            </view>
+          </block>
+        </view>
+      </scroll-view>
     </view>
   </view>
 
 </view>
+

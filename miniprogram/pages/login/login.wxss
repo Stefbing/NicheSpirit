@@ -463,104 +463,184 @@
 }
 
 /* ========================================
- * 底部弹窗：隐私协议授权（丰巢风格）
+ * 协议/政策详情底部蒙层弹窗
+ * 覆盖底部+两侧，顶部留白
  * ======================================== */
 
-.privacy-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  background: rgba(0, 0, 0, 0.7);
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  animation: fadeIn 0.3s ease;
-}
-@keyframes fadeIn {
+@keyframes maskFadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
 }
-
-.privacy-modal {
-  width: 100%;
-  max-width: 640rpx;
-  background: linear-gradient(145deg, #1a1a3a, #0d0d2b);
-  border-radius: 28rpx 28rpx 0 0;
-  padding: 36rpx 36rpx 40rpx;
-  box-sizing: border-box;
-  border: 1rpx solid rgba(255, 255, 255, 0.06);
-  box-shadow: 0 -16rpx 60rpx rgba(0, 0, 0, 0.5);
-  animation: slideUp 0.35s cubic-bezier(0.4, 0, 0.2, 1) both;
+@keyframes maskFadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 @keyframes slideUp {
   from { transform: translateY(100%); }
   to { transform: translateY(0); }
 }
-
-.privacy-modal-body {
-  margin-bottom: 32rpx;
+@keyframes slideDown {
+  from { transform: translateY(0); }
+  to { transform: translateY(100%); }
 }
 
-.privacy-modal-title {
-  font-size: 28rpx;
-  font-weight: 700;
-  color: #ffffff;
-  margin-bottom: 12rpx;
-  text-align: center;
+.agreement-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
 }
 
-.privacy-modal-check {
+.agreement-mask:not(.fade-out) {
+  animation: maskFadeIn 0.3s ease both;
+}
+
+.agreement-mask.fade-out {
+  animation: maskFadeOut 0.35s ease both;
+  pointer-events: none;
+}
+
+/* 顶部空白蒙层区域 */
+.agreement-mask-top {
+  flex: 1;
+  min-height: 20vh;
+  background: transparent;
+}
+
+/* 底部弹窗主体 — 覆盖底部+两侧 */
+.agreement-modal {
+  width: 100%;
+  background: linear-gradient(145deg, #1a1a3a, #0d0d2b);
+  border-radius: 28rpx 28rpx 0 0;
+  border: 1rpx solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 -16rpx 60rpx rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  max-height: 80vh;
+}
+
+/* 底部滑入 */
+.agreement-modal.slide-in {
+  animation: slideUp 0.35s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* 底部滑出 */
+.agreement-modal.slide-down {
+  animation: slideDown 0.35s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* 顶部栏 */
+.agreement-header {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 12rpx;
-  padding: 16rpx 0;
+  padding: 24rpx 32rpx 0;
+  border-bottom: 1rpx solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
 }
 
-.privacy-modal-text {
+.agreement-tabs {
+  display: flex;
+  flex: 1;
+  gap: 0;
+}
+
+.agreement-tab {
+  padding: 20rpx 24rpx;
+  position: relative;
+  text-align: center;
+  transition: all 0.3s;
+}
+
+.agreement-tab.active .agreement-tab-text {
+  color: #ffffff;
+}
+
+.agreement-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 20%;
+  right: 20%;
+  height: 3rpx;
+  background: linear-gradient(90deg, #667eea, #764ba2);
+  border-radius: 2rpx;
+}
+
+.agreement-tab-text {
   font-size: 24rpx;
-  color: rgba(255, 255, 255, 0.5);
-  line-height: 1.4;
-}
-
-.privacy-modal-link {
-  color: #667eea;
+  color: rgba(255, 255, 255, 0.35);
   font-weight: 500;
 }
 
-.privacy-modal-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 16rpx;
-}
-
-.modal-btn {
-  width: 100%;
-  height: 80rpx;
-  border-radius: 40rpx;
-  font-size: 26rpx;
-  font-weight: 600;
+/* 关闭按钮 */
+.agreement-close-btn {
+  width: 52rpx;
+  height: 52rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
   display: flex;
   align-items: center;
   justify-content: center;
-  letter-spacing: 1rpx;
+  flex-shrink: 0;
+  margin-left: 16rpx;
+  transition: all 0.2s;
 }
-.modal-btn::after { border: none; }
 
-.confirm-btn {
+.agreement-close-btn:active {
+  background: rgba(255, 255, 255, 0.12);
+  transform: scale(0.9);
+}
+
+.close-icon {
+  font-size: 24rpx;
+  color: rgba(255, 255, 255, 0.4);
+  font-weight: 300;
+}
+
+/* 内容滚动区 */
+.agreement-content {
+  flex: 1;
+  padding: 28rpx 32rpx 48rpx;
+  box-sizing: border-box;
+  max-height: 65vh;
+}
+
+.agreement-section-title {
+  font-size: 30rpx;
+  font-weight: 700;
   color: #ffffff;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  box-shadow: 0 6rpx 24rpx rgba(102, 126, 234, 0.35);
-}
-.confirm-btn:not([disabled]):active { transform: scale(0.97); }
-.confirm-btn[disabled] {
-  opacity: 0.35;
-  color: rgba(255, 255, 255, 0.15);
+  margin-bottom: 10rpx;
+  text-shadow: 0 0 20rpx rgba(102, 126, 234, 0.3);
 }
 
-.reject-btn {
-  background: transparent;
-  border: 1rpx solid rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.35);
+.agreement-update {
+  font-size: 20rpx;
+  color: rgba(255, 255, 255, 0.3);
+  margin-bottom: 4rpx;
 }
-.reject-btn:active { background: rgba(255, 255, 255, 0.04); }
+
+.agreement-article {
+  margin-top: 24rpx;
+}
+
+.agreement-article-title {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: rgba(102, 126, 234, 0.9);
+  margin-bottom: 10rpx;
+  display: block;
+  letter-spacing: 0.5rpx;
+}
+
+.agreement-article-text {
+  font-size: 24rpx;
+  color: rgba(255, 255, 255, 0.6);
+  line-height: 1.7;
+  display: block;
+  white-space: pre-line;
+  word-break: break-all;
+}

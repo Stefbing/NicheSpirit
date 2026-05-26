@@ -4,7 +4,6 @@ const cloudRequest = require('../../utils/cloud_request.js')
 Page({
   data: {
     userInfo: null,
-    phoneNumber: '',
     userDevices: [],
     petDevices: [],
     healthDevices: [],
@@ -16,11 +15,7 @@ Page({
     deviceAccount: '',
     devicePassword: '',
     greeting: '',
-    devicesLoaded: false,  // 标记设备是否已加载
-    // 登录视图状态
-    loginView: 'main',     // 'main' | 'phone' | 'other'
-    otherAccount: '',
-    otherPassword: '',
+    devicesLoaded: false,
     // 分享相关
     showShareConfirm: false,
     showAcceptShare: false,
@@ -29,58 +24,61 @@ Page({
   },
   
   onLoad: function (query) {
-    // 隐藏系统导航栏左侧可能出现的"返回首页"按钮
-    wx.hideHomeButton()
+    wx.hideHomeButton();
 
-    this.updateGreeting()
-    this.checkLoginStatus()
+    const userInfo = wx.getStorageSync('userInfo');
+    if (!userInfo || !userInfo.user_id) {
+      wx.reLaunch({ url: '/pages/login/login' });
+      return;
+    }
 
-    // 检测是否从分享卡片进入（携带 share_token）
+    this.updateGreeting();
+    this.loadUserDevices();
+
     if (query && query.share_token) {
-      this.setData({ shareToken: query.share_token })
-      this.handleIncomingShare(query.share_token)
+      this.setData({ shareToken: query.share_token });
+      this.handleIncomingShare(query.share_token);
     }
   },
   
   onShow: function() {
-    // 关闭右上角"..."菜单的分享功能，统一使用页内分享按钮
     wx.hideShareMenu({ menus: ['share', 'shareTimeline'] });
-
-    // 关闭前页跳转时可能留下的 loading 遮罩（如登录页 → 首页）
     wx.hideLoading();
-    
-    this.updateGreeting()
 
-    // 检查是否有登录后待处理的分享
-    const pendingToken = app.globalData._pendingShareToken
-    if (pendingToken && this.data.userInfo && this.data.userInfo.user_id) {
-      app.globalData._pendingShareToken = ''
-      this.setData({ shareToken: pendingToken })
-      this.handleIncomingShare(pendingToken)
+    const userInfo = wx.getStorageSync('userInfo');
+    if (!userInfo || !userInfo.user_id) {
+      wx.reLaunch({ url: '/pages/login/login' });
+      return;
+    }
+    if (!this.data.userInfo) {
+      this.setData({ userInfo });
     }
 
-    // onShow不再加载设备数据，只处理设备状态监听
+    this.updateGreeting();
+
+    const pendingToken = app.globalData._pendingShareToken;
+    if (pendingToken && this.data.userInfo && this.data.userInfo.user_id) {
+      app.globalData._pendingShareToken = '';
+      this.setData({ shareToken: pendingToken });
+      this.handleIncomingShare(pendingToken);
+    }
+
     if (this.data.userInfo) {
-      // 注册设备状态更新监听
       this.registerDeviceStatusListener();
-      
-      // 【新增】如果 dashboard 缓存已被清除（称重页保存后），重新加载设备数据
+
       const app = getApp();
       if (!app.globalData.cachedDashboardData && this.data.devicesLoaded) {
         console.log('[首页] 🔄 检测到缓存已清除，重新加载设备数据');
         this.loadUserDevices();
       } else if (this.data.devicesLoaded && app.globalData.cachedDashboardData) {
-        // 【新增】检查缓存数据是否完整，如果不完整则强制刷新
         const cachedData = app.globalData.cachedDashboardData;
         const hasXiaomiConfig = cachedData.xiaomi_config || false;
         const hasScaleStats = cachedData.scale_stats && typeof cachedData.scale_stats === 'object' && 'today_count' in cachedData.scale_stats;
-        
+
         if (hasXiaomiConfig && !hasScaleStats) {
-          console.warn('[首页] ⚠️ 缓存数据不完整（缺少 scale_stats），强制刷新');
-          // 清除缓存
+          console.warn('[首页] ⚠️ 缓存数据不完整，强制刷新');
           app.globalData.cachedDashboardData = null;
           app.globalData.dashboardCacheTime = 0;
-          // 重新加载
           this.loadUserDevices();
         }
       }
@@ -170,131 +168,14 @@ Page({
   
   // 检查登录状态
   checkLoginStatus() {
-    const userInfo = wx.getStorageSync('userInfo')
-    if (userInfo) {
-      this.setData({ userInfo })
-      // 只在有用户信息且设备未加载时才加载设备数据
-      if (!this.data.devicesLoaded) {
-        this.loadUserDevices()
-      }
+    const userInfo = wx.getStorageSync('userInfo');
+    if (!userInfo || !userInfo.user_id) {
+      wx.reLaunch({ url: '/pages/login/login' });
+      return;
     }
-  },
-  
-  // 手机号输入
-  onPhoneInput(e) {
-    this.setData({ phoneNumber: e.detail.value })
-  },
-
-  // ===== 登录视图切换 =====
-  switchToPhoneLogin() {
-    this.setData({ loginView: 'phone', phoneNumber: '' })
-  },
-  switchToOtherLogin() {
-    this.setData({ loginView: 'other', otherAccount: '', otherPassword: '' })
-  },
-  switchToMain() {
-    this.setData({ loginView: 'main' })
-  },
-
-  // 其他方式 - 账号输入
-  onOtherAccountInput(e) {
-    this.setData({ otherAccount: e.detail.value })
-  },
-  // 其他方式 - 密码输入
-  onOtherPasswordInput(e) {
-    this.setData({ otherPassword: e.detail.value })
-  },
-  // 其他方式 - 登录
-  async onOtherLogin() {
-    const { otherAccount, otherPassword } = this.data
-    if (!otherAccount) {
-      wx.showToast({ title: '请输入账号', icon: 'none' })
-      return
-    }
-    if (!otherPassword || otherPassword.length < 4) {
-      wx.showToast({ title: '密码至少4位', icon: 'none' })
-      return
-    }
-    wx.showLoading({ title: '登录中...' })
-    try {
-      const res = await cloudRequest.callContainer({
-        path: '/api/auth/login',
-        method: 'POST',
-        data: {
-          phone_number: otherAccount,
-          nickname: `用户${otherAccount.slice(-4)}`,
-          password: otherPassword
-        }
-      })
-      const userInfo = res
-      wx.setStorageSync('userInfo', userInfo)
-      this.setData({ userInfo, loginView: 'main' })
-      const app = getApp()
-      if (!app.globalData.bleAdapterInitialized) {
-        await app.checkAndInitBluetooth(userInfo.user_id)
-      }
-      if (!this.data.devicesLoaded) {
-        await this.loadUserDevices()
-      }
-      wx.hideLoading()
-      wx.showToast({ title: '登录成功', icon: 'success' })
-    } catch (err) {
-      wx.hideLoading()
-      console.error('其他方式登录异常:', err)
-      wx.showToast({ title: err.errMsg || '登录失败，请重试', icon: 'none', duration: 3000 })
-    }
-  },
-
-  // 登录/注册
-  async onLogin() {
-    const { phoneNumber } = this.data
-    
-    if (!phoneNumber || phoneNumber.length !== 11) {
-      wx.showToast({ title: '请输入正确的手机号', icon: 'none' })
-      return
-    }
-    
-    wx.showLoading({ title: '登录中...' })
-    
-    try {
-      const res = await cloudRequest.callContainer({
-        path: '/api/auth/login',
-        method: 'POST',
-        data: {
-          phone_number: phoneNumber,
-          nickname: `用户${phoneNumber.slice(-4)}`
-        }
-      })
-      
-      const userInfo = res
-      wx.setStorageSync('userInfo', userInfo)
-      this.setData({ userInfo, loginView: 'main' })
-      
-      // 先初始化蓝牙（会获取并缓存dashboard数据）
-      const app = getApp()
-      if (!app.globalData.bleAdapterInitialized) {
-        console.log('[首页] 🚀 登录成功，开始初始化蓝牙')
-        await app.checkAndInitBluetooth(userInfo.user_id)
-      }
-      
-      // 然后加载设备列表（使用缓存的dashboard数据）
-      if (!this.data.devicesLoaded) {
-        await this.loadUserDevices()
-      }
-      
-      wx.hideLoading()
-      wx.showToast({ 
-        title: userInfo.has_configured ? '登录成功，设备已连接' : '登录成功', 
-        icon: 'success' 
-      })
-    } catch (err) {
-      wx.hideLoading()
-      console.error('登录异常:', err)
-      wx.showToast({ 
-        title: err.errMsg || '登录失败，请重试', 
-        icon: 'none',
-        duration: 3000
-      })
+    this.setData({ userInfo });
+    if (!this.data.devicesLoaded) {
+      this.loadUserDevices();
     }
   },
   
