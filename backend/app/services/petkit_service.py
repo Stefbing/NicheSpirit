@@ -12,6 +12,7 @@ import re
 from sqlmodel import Session, select
 from ..models.db import engine
 from ..models.models import SystemConfig
+from ..utils.session_cache import SessionCache
 from typing import Optional, Dict, Any, List
 
 logging.basicConfig(level=logging.INFO)
@@ -41,6 +42,9 @@ class PetKitService:
         self._devices_refresh_lock = asyncio.Lock()
         self._ssl_context = None
         self._initialized = False
+        # 二级缓存：内存层
+        self._memory_session: Optional[dict] = None
+        self._session_cache = SessionCache("petkit", "session_data", ttl=30*60)
 
         # 延迟初始化，避免在 __init__ 中执行阻塞操作
         if not self.username or not self.password:
@@ -101,8 +105,21 @@ class PetKitService:
             return True
 
     async def _load_session_from_db(self) -> bool:
-        """Try to load the latest session data from database"""
+        """Try to load the latest session data from database（二级缓存：内存 → DB）"""
         try:
+            # ---- 1. 检查内存缓存 ----
+            if self._memory_session:
+                saved_time = self._memory_session.get('timestamp', 0)
+                if int(time.time() * 1000) - saved_time <= SESSION_EXPIRY_MS:
+                    logger.info("PetKit session restored from memory cache")
+                    restored = await self._restore_session(self._memory_session)
+                    if restored:
+                        self._initialized = True
+                    return restored
+                else:
+                    self._memory_session = None  # 内存过期，清除
+
+            # ---- 2. 从DB加载 ----
             loop = asyncio.get_event_loop()
             
             def _load():
@@ -110,7 +127,7 @@ class PetKitService:
                     statement = select(SystemConfig).where(
                         SystemConfig.key == TOKEN_KEY,
                         SystemConfig.user_id == (self.user_id or 0),
-                        SystemConfig.is_active == True  # 只查询未删除的配置
+                        SystemConfig.is_active == True
                     ).order_by(SystemConfig.id.desc())
                     config = session_db.exec(statement).first()
                     if config:
@@ -126,7 +143,11 @@ class PetKitService:
                 
                 if current_time - saved_time > SESSION_EXPIRY_MS:
                     logger.info("PetKit session expired, need re-login")
+                    self._memory_session = None
                     return False
+                
+                # 加载成功，写入内存缓存
+                self._memory_session = session_data
                 
                 restored = await self._restore_session(session_data)
                 if restored:
@@ -192,7 +213,9 @@ class PetKitService:
                     session_db.commit()
             
             await loop.run_in_executor(None, _save)
-            logger.info("Saved PetKit session to database")
+            # 同步更新内存缓存
+            self._memory_session = session_data
+            logger.info("Saved PetKit session to database + memory cache")
         except Exception as e:
             logger.error(f"Failed to save session to DB: {e}")
 
@@ -247,6 +270,8 @@ class PetKitService:
             finally:
                 self.session = None
                 self.client = None
+                self._memory_session = None
+                self._initialized = False
 
     async def _login(self) -> bool:
         """

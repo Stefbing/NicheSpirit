@@ -24,6 +24,7 @@ class XiaomiCloudService:
         self.userId = None
         self._serviceToken = None
         self._token_key = "xiaomi_cloud_token"
+        self._loaded_at = 0  # 内存缓存加载时间戳（毫秒）
 
         # 初始化设备 ID 和代理
         self._device_id = self._generate_device_id()
@@ -87,6 +88,7 @@ class XiaomiCloudService:
                         return False
 
                     logger.info("Loaded Xiaomi Cloud token from database")
+                    self._loaded_at = int(time.time() * 1000)
                     return True
         except Exception as e:
             logger.warning(f"Could not load token from DB: {e}")

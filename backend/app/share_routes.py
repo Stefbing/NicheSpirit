@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/share", tags=["share"])
 
 class CreateShareRequest(BaseModel):
     from_user_id: int
-    device_keys: list[str]        # 要分享的设备 key 列表
+    device_keys: list[str]        # 要分享的设备 key 列表，如 ["cloudpets_cloudpets"]
 
 class CreateShareResponse(BaseModel):
     share_id: int
@@ -26,12 +26,6 @@ class AcceptShareRequest(BaseModel):
     share_token: str
     to_user_id: int               # 接受者的 user_id（由 wx.login 换取 openid 后获取）
 
-class SharedDeviceInfo(BaseModel):
-    device_key: str
-    device_name: str
-    platform: str
-    from_user_name: str
-
 class ShareListResponse(BaseModel):
     shares: list[dict]
 
@@ -42,17 +36,35 @@ def _generate_token() -> str:
     raw = f"{time.time()}{uuid.uuid4().hex}"
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
-def _get_device_configs(session: Session, user_id: int, device_keys: list[str]) -> dict:
-    """获取某个用户的设备配置（按 device_key 过滤）"""
+def _parse_device_keys(device_keys: list[str]) -> set:
+    """
+    从 device_keys（如 ["cloudpets_cloudpets"]）提取平台名集合
+    device_key 格式: {platform}_{device_name}
+    """
+    platforms = set()
+    for key in device_keys:
+        parts = key.split('_', 1)
+        if parts:
+            platforms.add(parts[0])
+    return platforms
+
+def _get_device_configs_by_platforms(session: Session, user_id: int, platforms: set) -> dict:
+    """
+    获取指定用户在指定平台集合下的设备配置（按 platform 分组）
+    返回: { "cloudpets": {"account": "xxx", "password": "xxx"}, ... }
+    """
+    if not platforms:
+        return {}
+
     configs = session.exec(
         select(SystemConfig).where(
             SystemConfig.user_id == user_id,
             SystemConfig.key.in_(["account", "password"]),
+            SystemConfig.platform.in_(list(platforms)),
             SystemConfig.is_active == True
         )
     ).all()
 
-    # 按 platform 分组
     result = {}
     for cfg in configs:
         plat = cfg.platform
@@ -102,7 +114,10 @@ async def create_share(request: CreateShareRequest, session: Session = Depends(g
 
 @router.post("/accept")
 async def accept_share(request: AcceptShareRequest, session: Session = Depends(get_session)):
-    """用户B接受分享 — 自动配置设备"""
+    """
+    用户B接受分享
+    【修复】不再向 B 的 systemconfig 写入假凭据，仅记录在 shared_device_config
+    """
     share = session.exec(
         select(DeviceShare).where(
             DeviceShare.share_token == request.share_token,
@@ -131,44 +146,21 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
 
     device_keys = json.loads(share.device_keys)
 
-    # 获取分享者的设备配置（读取明文 password 用于生成被分享者配置）
-    from_configs = _get_device_configs(session, share.from_user_id, device_keys)
+    # 【修复】从 device_keys 解析出要分享的平台集合，只获取这些平台的配置
+    platforms = _parse_device_keys(device_keys)
+    from_configs = _get_device_configs_by_platforms(session, share.from_user_id, platforms)
 
+    # 【修复】不再向 B 的 systemconfig 写入假凭据
+    # 改为：只为每个 shared_device_key 记录分享配置映射
     created_configs = []
     for platform, creds in from_configs.items():
         if not creds["account"] or not creds["password"]:
             continue
 
-        # 为被分享者生成独立的凭证标识（追加 _shared 后缀避免重复）
+        # 为被分享者生成独立的凭证标识
         shared_account = f"{creds['account']}_shared_{request.to_user_id}"
 
-        # 写入被分享者的 systemconfig
-        for key, val in [("account", shared_account), ("password", creds["password"])]:
-            existing = session.exec(
-                select(SystemConfig).where(
-                    SystemConfig.user_id == request.to_user_id,
-                    SystemConfig.platform == platform,
-                    SystemConfig.key == key,
-                    SystemConfig.is_active == True
-                )
-            ).first()
-
-            if existing:
-                existing.value = val
-                existing.updated_at = now_ms
-                session.add(existing)
-            else:
-                session.add(SystemConfig(
-                    user_id=request.to_user_id,
-                    key=key,
-                    value=val,
-                    platform=platform,
-                    device_name=f"shared_{platform}",
-                    is_active=True,
-                    updated_at=now_ms,
-                ))
-
-        # 记录共享配置映射
+        # 记录共享配置映射（仅写入 shared_device_config，不写入 B 的 systemconfig）
         for dk in device_keys:
             sc = SharedDeviceConfig(
                 share_id=share.id,
@@ -191,7 +183,7 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
 
     return {
         "success": True,
-        "message": "设备已自动配置完成",
+        "message": "分享接受成功",
         "configured": created_configs,
     }
 

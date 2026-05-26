@@ -6,6 +6,7 @@ import time
 import asyncio
 from typing import Optional, List, Dict, Any, Callable, TypeVar, Tuple
 from sqlmodel import Session, select
+from sqlalchemy import or_
 from ..models.db import engine
 from ..models.models import SystemConfig
 from .config_encryptor import ConfigEncryptor
@@ -104,6 +105,14 @@ async def get_configs_batch(keys_users: List[Tuple[str, Optional[int], Optional[
                 if platform:
                     statement = statement.where(SystemConfig.platform == platform)
                 
+                # 【修复】排除共享配置（device_name以"shared_"开头），防止旧共享假凭据污染仪表盘
+                statement = statement.where(
+                    or_(
+                        SystemConfig.device_name.is_(None),
+                        ~SystemConfig.device_name.like('shared_%')
+                    )
+                )
+                
                 config = session.exec(statement.order_by(SystemConfig.id.desc())).first()
                 
                 cache_key = f"{key}_{user_id or 0}_{platform or 'global'}"
@@ -189,7 +198,13 @@ async def get_user_devices(user_id: int, platform: Optional[str] = None) -> List
             statement = select(SystemConfig).where(
                 SystemConfig.user_id == user_id,
                 SystemConfig.platform.isnot(None),  # 只查询有platform的配置（即设备配置）
-                SystemConfig.is_active == True  # 只查询未删除的配置
+                SystemConfig.is_active == True,  # 只查询未删除的配置
+                # 【修复】排除共享配置（device_name以"shared_"开头），防止旧共享假凭据污染
+            ).where(
+                or_(
+                    SystemConfig.device_name.is_(None),
+                    ~SystemConfig.device_name.like('shared_%')
+                )
             )
             
             if platform:
@@ -292,6 +307,78 @@ async def add_device(user_id: int, platform: str, account: str, password: str,
     except Exception as e:
         logger.error(f"Failed to add device for user {user_id}: {e}")
         raise
+
+
+async def get_shared_devices_for_user(user_id: int) -> List[Dict[str, Any]]:
+    """
+    获取分享给该用户的设备配置列表（从 shared_device_config 表读取）
+    返回：每个共享设备包含 platform, device_key, 以及分享者的原始凭据
+    """
+    def _get_shared() -> List[Dict[str, Any]]:
+        with Session(engine) as session:
+            from ..models.models import SharedDeviceConfig, DeviceShare, SystemConfig
+
+            # 查询该用户收到的所有有效分享
+            shares = session.exec(
+                select(DeviceShare).where(
+                    DeviceShare.to_user_id == user_id,
+                    DeviceShare.status == "accepted"
+                )
+            ).all()
+
+            result = []
+            for share in shares:
+                # 获取分享者 A 的原始凭据
+                device_keys = json.loads(share.device_keys) if share.device_keys else []
+                platforms = set()
+                for dk in device_keys:
+                    parts = dk.split('_', 1)
+                    if parts:
+                        platforms.add(parts[0])
+
+                if not platforms:
+                    continue
+
+                # 读取 A 的原始凭据
+                configs = session.exec(
+                    select(SystemConfig).where(
+                        SystemConfig.user_id == share.from_user_id,
+                        SystemConfig.key.in_(["account", "password"]),
+                        SystemConfig.platform.in_(list(platforms)),
+                        SystemConfig.is_active == True
+                    )
+                ).all()
+
+                from_creds = {}
+                for cfg in configs:
+                    plat = cfg.platform
+                    if plat not in from_creds:
+                        from_creds[plat] = {}
+                    if cfg.is_encrypted:
+                        from ..utils.config_encryptor import ConfigEncryptor
+                        from_creds[plat][cfg.key] = ConfigEncryptor.decrypt(cfg.value)
+                    else:
+                        from_creds[plat][cfg.key] = cfg.value
+
+                for dk in device_keys:
+                    dk_platform = dk.split('_', 1)[0]
+                    creds = from_creds.get(dk_platform, {})
+                    result.append({
+                        'platform': dk_platform,
+                        'device_key': dk,
+                        'share_id': share.id,
+                        'from_user_id': share.from_user_id,
+                        'account': creds.get('account', ''),
+                        'password': creds.get('password', ''),
+                    })
+
+            return result
+
+    try:
+        return await _run_db_operation(_get_shared)
+    except Exception as e:
+        logger.error(f"Failed to get shared devices for user {user_id}: {e}")
+        return []
 
 
 async def delete_device(user_id: int, device_key: str) -> bool:

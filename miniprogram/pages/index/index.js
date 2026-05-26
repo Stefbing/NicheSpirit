@@ -26,6 +26,13 @@ Page({
   onLoad: function (query) {
     wx.hideHomeButton();
 
+    // 【修复】在检查登录状态前，优先捕获分享token存到全局，避免跳转登录后丢失
+    if (query && query.share_token) {
+      const app = getApp()
+      app.globalData._pendingShareToken = query.share_token
+      console.log('[首页] 📥 从分享卡片捕获 share_token:', query.share_token)
+    }
+
     const userInfo = wx.getStorageSync('userInfo');
     if (!userInfo || !userInfo.user_id) {
       wx.reLaunch({ url: '/pages/login/login' });
@@ -35,11 +42,6 @@ Page({
 
     this.updateGreeting();
     this.loadUserDevices();
-
-    if (query && query.share_token) {
-      this.setData({ shareToken: query.share_token });
-      this.handleIncomingShare(query.share_token);
-    }
   },
   
   onShow: function() {

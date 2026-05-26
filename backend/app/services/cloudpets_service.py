@@ -46,6 +46,8 @@ class CloudPetsService:
         self._client = None  # 延迟初始化客户端
         self._base_url = None
         self._device_id = None
+        # 二级缓存：内存层
+        self._memory_token = None
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -70,11 +72,15 @@ class CloudPetsService:
                 timeout=REQUEST_TIMEOUT
             )
 
-    async def initialize(self, user_id: Optional[int] = None) -> bool:
-        """Initialize service: load token from DB, or login if credentials available"""
-        # 使用传入的user_id或实例的user_id
-        uid = user_id or self.user_id
+    async def initialize(self, user_id: Optional[int] = None, account: Optional[str] = None, password: Optional[str] = None) -> bool:
+        """Initialize service: load token from DB, or login if credentials available
         
+        Args:
+            user_id: 用户ID
+            account: 可选，直接传入账号（优先于 DB 查询）
+            password: 可选，直接传入密码（优先于 DB 查询）
+        """
+        uid = user_id or self.user_id
         logger.info(f"Initializing CloudPets Service (user_id={uid})...")
         
         # 确保客户端已初始化
@@ -85,9 +91,10 @@ class CloudPetsService:
             logger.info("CloudPets token loaded from DB")
             return True
         
-        # No token in DB, check if credentials are configured for this user
-        account = await self._get_config("account", user_id=uid)
-        password = await self._get_config("password", user_id=uid)
+        # 凭据来源：优先参数传入，其次 DB 查询
+        if not account or not password:
+            account = await self._get_config("account", user_id=uid)
+            password = await self._get_config("password", user_id=uid)
         
         if not account or not password:
             logger.info(f"No CloudPets credentials configured for user {uid}, skipping initialization")
@@ -132,8 +139,15 @@ class CloudPetsService:
         return account
 
     async def _load_token_from_db(self) -> bool:
-        """Try to load the latest token from database"""
+        """Try to load the latest token from database（二级缓存：内存 → DB）"""
         try:
+            # ---- 1. 检查内存缓存 ----
+            if self._memory_token:
+                self.client.headers["authorization"] = self._memory_token
+                logger.info("Loaded CloudPets token from memory cache")
+                return True
+
+            # ---- 2. 从DB加载 ----
             loop = asyncio.get_event_loop()
             
             def _load_token():
@@ -141,7 +155,7 @@ class CloudPetsService:
                     statement = select(SystemConfig).where(
                         SystemConfig.key == "cloudpets_token",
                         SystemConfig.user_id == (self.user_id or 0),
-                        SystemConfig.is_active == True  # 只查询未删除的配置
+                        SystemConfig.is_active == True
                     ).order_by(SystemConfig.id.desc())
                     config = session.exec(statement).first()
                     if config:
@@ -151,7 +165,8 @@ class CloudPetsService:
             token = await loop.run_in_executor(None, _load_token)
             if token:
                 self.client.headers["authorization"] = token
-                logger.info("Loaded CloudPets token from database")
+                self._memory_token = token  # 写入内存缓存
+                logger.info("Loaded CloudPets token from database → memory cache")
                 return True
         except Exception as e:
             logger.warning(f"Could not load token from DB (might be first run): {e}")
@@ -186,7 +201,8 @@ class CloudPetsService:
                     session.commit()
             
             await loop.run_in_executor(None, _save_token)
-            logger.info("Saved new CloudPets token to database")
+            self._memory_token = token  # 同步更新内存缓存
+            logger.info("Saved new CloudPets token to database + memory cache")
         except Exception as e:
             logger.error(f"Failed to save token to DB: {e}")
 

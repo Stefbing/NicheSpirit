@@ -16,9 +16,9 @@ class User(SQLModel, table=True):
     unionid: Optional[str] = Field(default=None, max_length=64)  # 微信 UnionID
     session_key: Optional[str] = Field(default=None, max_length=64)  # 微信 session_key
     nickname: Optional[str] = Field(default=None, max_length=100)  # 昵称
-    gender: str = Field(default="male", max_length=10)  # male/female
-    age: int = Field(default=25)
-    height: int = Field(default=175)  # cm
+    # 鉴权字段（替换JWT）
+    token_hash: Optional[str] = Field(default=None, max_length=64, unique=True, index=True)  # 登录token的SHA256哈希
+    token_expires_at: Optional[int] = Field(default=None, sa_column=Column(BIGINT))  # token过期时间（毫秒）
     privacy_consent_at: Optional[int] = Field(default=None, sa_column=Column(BIGINT))  # 隐私协议同意时间戳（毫秒）
     created_at: int = Field(default_factory=lambda: int(time.time() * 1000), sa_column=Column(BIGINT, nullable=False))
     updated_at: int = Field(default_factory=lambda: int(time.time() * 1000), sa_column=Column(BIGINT, nullable=False))
