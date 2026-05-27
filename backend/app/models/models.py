@@ -42,8 +42,6 @@ class WeightRecord(SQLModel, table=True):
     bone_mass: Optional[float] = None
     bmr: Optional[float] = None
     timestamp: int = Field(default_factory=lambda: int(time.time() * 1000), sa_column=Column(BIGINT, nullable=False, index=True))
-    xiaomi_pushed: bool = Field(default=False)
-    xiaomi_push_time: Optional[int] = Field(default=None, sa_column=Column(BIGINT))
     created_at: int = Field(default_factory=lambda: int(time.time() * 1000), sa_column=Column(BIGINT, nullable=False))
 
 class FamilyMember(SQLModel, table=True):

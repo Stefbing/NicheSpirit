@@ -200,9 +200,13 @@ Page({
       const userDevices = []
 
       // 从 device_platforms（缓存分组）渲染设备卡片
+      // 显示依据：设备配置完整性 is_complete，而非云 API 返回数据
       const platforms = dashboardData.device_platforms || []
 
       for (const plat of platforms) {
+        // 跳过未完整配置的设备
+        if (!plat.is_complete) continue
+
         if (plat.is_ble) {
           // 体脂秤 — 本地蓝牙设备
           const scaleDevice = {
@@ -227,11 +231,7 @@ Page({
           userDevices.push(scaleDevice)
 
         } else if (plat.platform === 'cloudpets') {
-          // CloudPets 喂食机 — 云设备，需要有实际投喂数据才渲染
-          const hasServings = dashboardData.cloudpets_servings &&
-            Object.keys(dashboardData.cloudpets_servings).length > 0
-          if (!hasServings) continue
-
+          // CloudPets 喂食机 — 卡片始终显示（is_complete=true），详情数据可选
           const feederDevice = {
             device_key: plat.device_key,
             device_type: 'feeder',
@@ -239,11 +239,16 @@ Page({
             display_name: plat.device_name || '喂食机',
             platform: plat.platform,
             status: 'active',
+            today_servings: 0,
+            remaining_plans: 0,
           }
 
           const servingsData = dashboardData.cloudpets_servings
-          feederDevice.today_servings = (servingsData && typeof servingsData === 'object')
-            ? (servingsData.result || 0) : (typeof servingsData === 'number' ? servingsData : 0)
+          if (servingsData && typeof servingsData === 'object') {
+            feederDevice.today_servings = servingsData.result || 0
+          } else if (typeof servingsData === 'number') {
+            feederDevice.today_servings = servingsData
+          }
 
           const plans = dashboardData.cloudpets_plans || []
           if (Array.isArray(plans)) {
@@ -257,17 +262,14 @@ Page({
               }
             })
             feederDevice.remaining_plans = remaining
-          } else {
-            feederDevice.remaining_plans = 0
           }
 
           petDevices.push(feederDevice)
           userDevices.push(feederDevice)
 
         } else if (plat.platform === 'petkit') {
-          // PetKit 猫厕所 — 云设备，需要 API 返回的数据
+          // PetKit 猫厕所 — 卡片始终显示（is_complete=true），详情数据可选
           const petkitDevices = dashboardData.petkit_devices || []
-          if (petkitDevices.length === 0) continue
 
           const litterboxDevice = {
             device_key: plat.device_key,
@@ -276,6 +278,8 @@ Page({
             display_name: plat.device_name || '猫厕所',
             platform: plat.platform,
             status: 'active',
+            today_visits: 0,
+            sand_level: 0,
           }
 
           const litterboxStats = dashboardData.litterbox_stats || {}
@@ -291,9 +295,6 @@ Page({
             else if (found.state_summary) stats = found.state_summary
             litterboxDevice.today_visits = stats.today_visits !== undefined ? stats.today_visits : 0
             litterboxDevice.sand_level = stats.sand_percent || 0
-          } else {
-            litterboxDevice.today_visits = 0
-            litterboxDevice.sand_level = 0
           }
 
           petDevices.push(litterboxDevice)
