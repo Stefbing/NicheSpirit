@@ -251,9 +251,12 @@
     </view>
 
     <!-- 添加/编辑成员弹窗 -->
-    <view wx:if="{{showAddMemberDialog}}" class="modal-mask" bindtap="closeAddMemberModal">
+    <view wx:if="{{showAddMemberDialog}}" class="modal-mask" bindtap="closeAddMemberDialog">
         <view class="modal-box modal-form" catchtap="stopPropagation">
-            <view class="modal-title">{{editingMemberId ? '编辑成员' : '添加家庭成员'}}</view>
+            <view class="modal-header-row">
+                <text class="modal-title">{{editingMemberId ? '编辑成员' : '添加家庭成员'}}</text>
+                <text class="modal-close" bindtap="closeAddMemberDialog">✕</text>
+            </view>
 
             <view class="form-group">
                 <text class="form-label">姓名 <text class="required">*</text></text>
@@ -278,7 +281,10 @@
                 </picker>
             </view>
 
-            <button class="submit-btn" bindtap="submitAddMember">{{editingMemberId ? '保存修改' : '确认添加'}}</button>
+            <view class="modal-btn-row">
+                <button class="cancel-btn" bindtap="closeAddMemberDialog">取消</button>
+                <button class="submit-btn" bindtap="submitAddMember">{{editingMemberId ? '保存修改' : '确认添加'}}</button>
+            </view>
         </view>
     </view>
 

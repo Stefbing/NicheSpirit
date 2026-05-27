@@ -12,10 +12,6 @@ Page({
     petkitPassword: '',
     petkitSaving: false,
 
-    // Xiaomi
-    xiaomiAccount: '',
-    xiaomiPassword: '',
-    xiaomiSaving: false
   },
 
   onLoad() {
@@ -34,9 +30,7 @@ Page({
           cloudpetsAccount: config.cloudpets_account || '',
           cloudpetsPassword: config.cloudpets_password || '',
           petkitAccount: config.petkit_account || '',
-          petkitPassword: config.petkit_password || '',
-          xiaomiAccount: config.xiaomi_account || '',
-          xiaomiPassword: config.xiaomi_password || ''
+          petkitPassword: config.petkit_password || ''
         });
       }
     } catch (err) {
@@ -60,15 +54,6 @@ Page({
 
   onPetkitPasswordInput(e) {
     this.setData({ petkitPassword: e.detail.value });
-  },
-
-  // Xiaomi 输入
-  onXiaomiAccountInput(e) {
-    this.setData({ xiaomiAccount: e.detail.value });
-  },
-
-  onXiaomiPasswordInput(e) {
-    this.setData({ xiaomiPassword: e.detail.value });
   },
 
   // 保存 CloudPets 配置
@@ -135,58 +120,16 @@ Page({
     }
   },
 
-  // 保存 Xiaomi 配置
-  async saveXiaomiConfig() {
-    const { xiaomiAccount, xiaomiPassword } = this.data;
-
-    if (!xiaomiAccount || !xiaomiPassword) {
-      wx.showToast({ title: '请填写完整信息', icon: 'none' });
-      return;
-    }
-
-    this.setData({ xiaomiSaving: true });
-
-    try {
-      await cloudRequest.callContainer({
-        path: '/api/system/config',
-        method: 'POST',
-        data: {
-          platform: 'xiaomi',
-          account: xiaomiAccount,
-          password: xiaomiPassword
-        }
-      });
-
-      wx.showToast({ title: '保存成功', icon: 'success' });
-      this.setData({ xiaomiPassword: '********' });
-    } catch (err) {
-      console.error('保存失败:', err);
-      wx.showToast({ title: '保存失败', icon: 'error' });
-    } finally {
-      this.setData({ xiaomiSaving: false });
-    }
-  },
-  
   // 下拉刷新
   async onPullDownRefresh() {
     console.log('[配置页] 下拉刷新')
     
     try {
-      await this.loadConfig()
-      
-      wx.showToast({
-        title: '刷新成功',
-        icon: 'success',
-        duration: 1000
-      })
+      await this.loadConfig();
     } catch (err) {
-      console.error('刷新失败:', err)
-      wx.showToast({
-        title: '刷新失败',
-        icon: 'none'
-      })
+      console.error('刷新失败:', err);
     } finally {
-      wx.stopPullDownRefresh()
+      wx.stopPullDownRefresh();
     }
-  }
+  },
 });

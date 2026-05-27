@@ -74,37 +74,4 @@
     </view>
   </view>
 
-  <!-- Xiaomi 配置 -->
-  <view class="config-section stagger-3">
-    <view class="section-header">
-      <text class="section-icon">⚖️</text>
-      <text class="section-name">小米体脂秤</text>
-    </view>
-
-    <view class="config-card">
-      <view class="form-group">
-        <text class="form-label">小米账号</text>
-        <input class="form-input"
-               placeholder="请输入小米账号（手机号/邮箱）"
-               value="{{xiaomiAccount}}"
-               bindinput="onXiaomiAccountInput" />
-      </view>
-
-      <view class="form-group">
-        <text class="form-label">密码</text>
-        <input class="form-input"
-               type="password"
-               placeholder="请输入小米密码"
-               value="{{xiaomiPassword}}"
-               bindinput="onXiaomiPasswordInput" />
-      </view>
-
-      <button class="save-btn {{xiaomiSaving ? 'loading' : ''}}"
-              bindtap="saveXiaomiConfig"
-              disabled="{{xiaomiSaving}}">
-        <text wx:if="{{!xiaomiSaving}}">保存配置</text>
-        <text wx:else>保存中...</text>
-      </button>
-    </view>
-  </view>
 </view>

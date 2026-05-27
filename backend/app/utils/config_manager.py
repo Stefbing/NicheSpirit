@@ -197,9 +197,8 @@ async def get_user_devices(user_id: int, platform: Optional[str] = None) -> List
         with Session(engine) as session:
             statement = select(SystemConfig).where(
                 SystemConfig.user_id == user_id,
-                SystemConfig.platform.isnot(None),  # 只查询有platform的配置（即设备配置）
-                SystemConfig.is_active == True,  # 只查询未删除的配置
-                # 【修复】排除共享配置（device_name以"shared_"开头），防止旧共享假凭据污染
+                SystemConfig.platform.isnot(None),
+                SystemConfig.is_active == True,
             ).where(
                 or_(
                     SystemConfig.device_name.is_(None),
@@ -212,25 +211,37 @@ async def get_user_devices(user_id: int, platform: Optional[str] = None) -> List
             
             configs = session.exec(statement).all()
             
-            # 按 (platform, device_name) 分组，避免不同平台同名设备冲突
+            # 按 (platform, device_name) 分组
             devices_dict = {}
             for config in configs:
-                # 使用元组作为唯一键，确保不同平台的同名设备不会合并
                 device_key = (config.platform, config.device_name or "unknown")
                 
                 if device_key not in devices_dict:
                     devices_dict[device_key] = {
                         'platform': config.platform,
                         'device_name': config.device_name,
+                        'device_key': f"{config.platform}_{config.device_name}" if config.device_name else config.platform,
+                        'is_ble': config.key == 'ble_address',
                         'credentials': {}
                     }
                 
-                # 提取字段名（key就是account或password）
-                field_name = config.key  # account 或 password
-                if config.is_encrypted:
-                    devices_dict[device_key]['credentials'][field_name] = ConfigEncryptor.decrypt(config.value)
+                field_name = config.key
+                if field_name in ('account', 'password', 'token'):
+                    if config.is_encrypted:
+                        devices_dict[device_key]['credentials'][field_name] = ConfigEncryptor.decrypt(config.value)
+                    else:
+                        devices_dict[device_key]['credentials'][field_name] = config.value
                 else:
-                    devices_dict[device_key]['credentials'][field_name] = config.value
+                    devices_dict[device_key][field_name] = config.value if config.value else ''
+            
+            # 标记完整性
+            for d in devices_dict.values():
+                if d.get('is_ble'):
+                    d['is_complete'] = bool(d.get('ble_address'))
+                else:
+                    creds = d.get('credentials', {})
+                    d['is_complete'] = bool(creds.get('account')) and bool(creds.get('password'))
+                    d['has_token'] = bool(creds.get('token'))
             
             return list(devices_dict.values())
 
@@ -244,7 +255,7 @@ async def get_user_devices(user_id: int, platform: Optional[str] = None) -> List
 async def add_device(user_id: int, platform: str, account: str, password: str, 
                device_name: Optional[str] = None) -> str:
     """
-    添加设备到用户账户
+    添加设备到用户账户（保留旧接口，仅存 account+password）
     :param user_id: 用户ID
     :param platform: 平台名称
     :param account: 账号
@@ -252,18 +263,31 @@ async def add_device(user_id: int, platform: str, account: str, password: str,
     :param device_name: 设备名称（可选，不传则用platform作为名称）
     :return: 设备标识符（device_name）
     """
-    def _add_device() -> str:
+    return await add_cloud_device(user_id, platform, account, password, device_name=device_name)
+
+
+async def add_cloud_device(user_id: int, platform: str, account: str, password: str,
+                          token: str = '', device_name: Optional[str] = None) -> str:
+    """
+    添加云设备 - 存储 account + password + token，device_name 为真实设备名
+    :param user_id: 用户ID
+    :param platform: 平台名称（如 petkit, cloudpets）
+    :param account: 账号
+    :param password: 密码
+    :param token: 登录令牌（初始化后获取）
+    :param device_name: 真实设备名称（如"小佩智能全自动猫厕所 MAX2"），不传则用 platform
+    :return: 设备标识符
+    """
+    def _add() -> str:
         final_device_name = device_name or platform
         timestamp = _get_timestamp_ms()
         
         with Session(engine) as session:
             try:
-                # 准备数据
                 encrypted_account = ConfigEncryptor.encrypt(account)
                 encrypted_password = ConfigEncryptor.encrypt(password)
                 
-                # 辅助函数：保存或更新配置
-                def upsert_config(key: str, val: str):
+                def upsert_config(key: str, val: str, encrypted: bool = True):
                     stmt = select(SystemConfig).where(
                         SystemConfig.user_id == user_id,
                         SystemConfig.key == key,
@@ -273,17 +297,16 @@ async def add_device(user_id: int, platform: str, account: str, password: str,
                     cfg = session.exec(stmt).first()
                     
                     if cfg:
-                        # 如果配置存在（包括已删除的），更新它
-                        cfg.value = val
-                        cfg.is_encrypted = True
-                        cfg.is_active = True  # 恢复激活状态
+                        cfg.value = ConfigEncryptor.encrypt(val) if encrypted else val
+                        cfg.is_encrypted = encrypted
+                        cfg.is_active = True
                         cfg.updated_at = timestamp
                     else:
                         cfg = SystemConfig(
                             user_id=user_id,
                             key=key,
-                            value=val,
-                            is_encrypted=True,
+                            value=ConfigEncryptor.encrypt(val) if encrypted else val,
+                            is_encrypted=encrypted,
                             platform=platform,
                             device_name=final_device_name,
                             is_active=True,
@@ -291,22 +314,166 @@ async def add_device(user_id: int, platform: str, account: str, password: str,
                         )
                         session.add(cfg)
 
-                # 在同一个事务中保存 account 和 password
-                upsert_config("account", encrypted_account)
-                upsert_config("password", encrypted_password)
+                upsert_config("account", account)
+                upsert_config("password", password)
+                if token:
+                    upsert_config("token", token)
                 
                 session.commit()
-                logger.info(f"Device {final_device_name} ({platform}) added for user {user_id}")
+                logger.info(f"[Device] 云设备已保存: platform={platform}, name={final_device_name}, user={user_id}")
                 return final_device_name
             except Exception:
                 session.rollback()
                 raise
 
     try:
-        return await _run_db_operation(_add_device)
+        return await _run_db_operation(_add)
     except Exception as e:
-        logger.error(f"Failed to add device for user {user_id}: {e}")
+        logger.error(f"[Device] 保存云设备失败: {e}")
         raise
+
+
+async def add_ble_device(user_id: int, ble_address: str, device_name: str) -> str:
+    """
+    添加本地蓝牙设备 - 仅存一条 ble_address 记录
+    :param user_id: 用户ID
+    :param ble_address: BLE MAC 地址
+    :param device_name: BLE 设备名（如 "MIBFS"）
+    :return: 设备标识符
+    """
+    def _add() -> str:
+        timestamp = _get_timestamp_ms()
+        platform = 'xiaomi'
+        
+        with Session(engine) as session:
+            try:
+                stmt = select(SystemConfig).where(
+                    SystemConfig.user_id == user_id,
+                    SystemConfig.key == 'ble_address',
+                    SystemConfig.platform == platform,
+                )
+                cfg = session.exec(stmt).first()
+                
+                if cfg:
+                    cfg.value = ble_address
+                    cfg.is_encrypted = False
+                    cfg.is_active = True
+                    cfg.device_name = device_name
+                    cfg.updated_at = timestamp
+                else:
+                    cfg = SystemConfig(
+                        user_id=user_id,
+                        key='ble_address',
+                        value=ble_address,
+                        is_encrypted=False,
+                        platform=platform,
+                        device_name=device_name,
+                        is_active=True,
+                        updated_at=timestamp
+                    )
+                    session.add(cfg)
+                
+                session.commit()
+                logger.info(f"[Device] BLE设备已保存: platform={platform}, name={device_name}, user={user_id}")
+                return f"{platform}_{device_name}"
+            except Exception:
+                session.rollback()
+                raise
+
+    try:
+        return await _run_db_operation(_add)
+    except Exception as e:
+        logger.error(f"[Device] 保存BLE设备失败: {e}")
+        raise
+
+
+async def delete_device_by_platform(user_id: int, platform: str) -> bool:
+    """
+    按平台删除用户的所有设备配置（软删除）
+    :param user_id: 用户ID
+    :param platform: 平台名称
+    :return: 是否删除成功
+    """
+    def _delete() -> bool:
+        with Session(engine) as session:
+            stmt = select(SystemConfig).where(
+                SystemConfig.user_id == user_id,
+                SystemConfig.platform == platform,
+                SystemConfig.is_active == True
+            )
+            configs = session.exec(stmt).all()
+            
+            if not configs:
+                logger.warning(f"[Device] 平台 {platform} 无活跃配置，user={user_id}")
+                return False
+            
+            timestamp = _get_timestamp_ms()
+            for config in configs:
+                config.is_active = False
+                config.updated_at = timestamp
+            
+            session.commit()
+            logger.info(f"[Device] 平台 {platform} 已软删除 ({len(configs)} 条), user={user_id}")
+            return True
+
+    try:
+        return await _run_db_operation(_delete)
+    except Exception as e:
+        logger.error(f"[Device] 删除平台 {platform} 失败: {e}")
+        raise
+
+
+async def update_cloud_device_token(user_id: int, platform: str, token: str,
+                                    device_name: Optional[str] = None) -> bool:
+    """
+    更新云设备的 token 记录（服务层刷新 token 后调用，保持设备配置组完整）
+    :param user_id: 用户ID
+    :param platform: 平台名称
+    :param token: 新 token 值
+    :param device_name: 设备名称（可选，不传则用 platform）
+    :return: 是否更新成功
+    """
+    def _update() -> bool:
+        final_device_name = device_name or platform
+        timestamp = _get_timestamp_ms()
+
+        with Session(engine) as session:
+            stmt = select(SystemConfig).where(
+                SystemConfig.user_id == user_id,
+                SystemConfig.key == 'token',
+                SystemConfig.platform == platform,
+                SystemConfig.device_name == final_device_name,
+                SystemConfig.is_active == True,
+            )
+            cfg = session.exec(stmt).first()
+
+            if cfg:
+                cfg.value = ConfigEncryptor.encrypt(token)
+                cfg.is_encrypted = True
+                cfg.updated_at = timestamp
+                session.add(cfg)
+            else:
+                cfg = SystemConfig(
+                    user_id=user_id,
+                    key='token',
+                    value=ConfigEncryptor.encrypt(token),
+                    is_encrypted=True,
+                    platform=platform,
+                    device_name=final_device_name,
+                    is_active=True,
+                    updated_at=timestamp,
+                )
+                session.add(cfg)
+
+            session.commit()
+            logger.info(f"[Device] token 已更新: platform={platform}, name={final_device_name}, user={user_id}")
+            return True
+
+    try:
+        return await _run_db_operation(_update)
+    except Exception as e:
+        logger.error(f"[Device] token 更新失败: {e}")
+        return False
 
 
 async def get_shared_devices_for_user(user_id: int) -> List[Dict[str, Any]]:

@@ -71,8 +71,8 @@ Page({
     // 《隐私保护政策》章节数据
     privacyArticles: [
       { title: '', text: '我们深知个人信息对您的重要性，并会尽全力保护您的个人信息安全。本隐私保护政策说明了我们如何收集、使用、存储和保护您的个人信息。' },
-      { title: '一、信息收集范围与类型', text: '我们在您使用本小程序的过程中收集以下信息：\n\n1. 注册登录信息\n    • 手机号码：用于账号注册和登录验证\n    • 微信OpenID：通过微信code2session接口获取，用于静默登录\n    • 密码：加密存储（bcrypt哈希），用于账密登录验证\n\n2. 设备配置信息\n    • 云宠（CloudPets）账号密码：用于连接和管理喂食机\n    • 小佩（PetKit）账号密码：用于连接和管理猫厕所\n    • 小米（Xiaomi）账号密码：用于连接体脂秤和推送数据至小米云\n    以上设备凭证均采用AES加密存储于服务器数据库\n\n3. 健康数据\n    • 体重（kg）、阻抗值\n    • BMI、体脂率、肌肉量、水分率、蛋白质率\n    • 内脏脂肪等级、骨量、基础代谢率\n    • 测量时间戳\n\n4. 家庭成员信息\n    • 姓名、性别、年龄、身高、关系（如：自己/配偶/子女）' },
-      { title: '二、信息使用目的与方式', text: '我们收集的信息用于以下目的：\n\n1. 服务提供与维护\n    • 验证用户身份，提供账号登录功能\n    • 连接并控制您授权的智能设备（喂食机、猫厕所、体脂秤）\n    • 记录和展示体脂秤测量数据及历史趋势\n\n2. 数据同步\n    • 将体重数据推送至小米云，实现数据同步\n\n3. 服务优化\n    • 分析使用数据以改进产品功能和用户体验\n\n我们不会将您的个人信息用于上述目的之外的任何用途。' },
+      { title: '一、信息收集范围与类型', text: '我们在您使用本小程序的过程中收集以下信息：\n\n1. 注册登录信息\n    • 手机号码：用于账号注册和登录验证\n    • 微信OpenID：通过微信code2session接口获取，用于静默登录\n    • 密码：加密存储（bcrypt哈希），用于账密登录验证\n\n2. 设备配置信息\n    • 云宠（CloudPets）账号密码：用于连接和管理喂食机\n    • 小佩（PetKit）账号密码：用于连接和管理猫厕所\n    • 无：体脂秤为本地蓝牙设备，无需云端账号\n    以上设备凭证均采用AES加密存储于服务器数据库\n\n3. 健康数据\n    • 体重（kg）、阻抗值\n    • BMI、体脂率、肌肉量、水分率、蛋白质率\n    • 内脏脂肪等级、骨量、基础代谢率\n    • 测量时间戳\n\n4. 家庭成员信息\n    • 姓名、性别、年龄、身高、关系（如：自己/配偶/子女）' },
+      { title: '二、信息使用目的与方式', text: '我们收集的信息用于以下目的：\n\n1. 服务提供与维护\n    • 验证用户身份，提供账号登录功能\n    • 连接并控制您授权的智能设备（喂食机、猫厕所、体脂秤）\n    • 记录和展示体脂秤测量数据及历史趋势\n\n2. 数据同步\n    • 记录和展示体脂秤测量数据\n\n3. 服务优化\n    • 分析使用数据以改进产品功能和用户体验\n\n我们不会将您的个人信息用于上述目的之外的任何用途。' },
       { title: '三、信息存储与保护', text: '1. 存储位置：您的个人数据存储于中国大陆地区的服务器（微信云托管/腾讯云）。\n2. 存储期限：我们仅在提供服务所必需的期限内保留您的数据。账号注销后，我们将删除所有相关数据。\n3. 安全措施：\n    • 密码采用bcrypt哈希加密\n    • 设备凭证采用AES加密存储\n    • 通信使用HTTPS加密传输\n    • 定期安全审计和漏洞修复' },
       { title: '四、信息共享与公开', text: '1. 我们不会向第三方出售您的个人信息。\n2. 在以下情况下，我们可能共享您的信息：\n    • 获得您的明确同意\n    • 法律法规要求\n    • 保护我们或他人的合法权益\n3. 设备分享功能：当您主动分享设备给其他用户时，设备凭证将以加密方式共享给被分享用户。' },
       { title: '五、您的权利', text: '1. 访问权：您可查看已绑定的手机号、设备配置和健康数据。\n2. 更正权：您可修改个人信息和设备配置。\n3. 删除权：您可通过设置页的"账号注销"功能删除您的全部数据。\n4. 撤回同意权：您可在微信小程序设置中关闭授权。\n5. 注销账号：在设置页 → 账号信息维护与注销区 → 点击"注销账号"，确认后我们将删除所有数据。' },
@@ -343,27 +343,11 @@ Page({
       });
       isExisting = checkRes.exists === true;
     } catch (err) {
-      // 查询失败时默认为注册流程
       console.warn('[Login] 检查手机号状态失败，默认注册流程:', err);
     }
 
     this.setData({ loading: true, errorMsg: '', loadingText: isExisting ? '登录中…' : '注册中…' });
-    try {
-      const loginRes = await new Promise((resolve, reject) => {
-        wx.login({ success: resolve, fail: reject });
-      });
-      if (!loginRes.code) throw new Error('获取微信凭证失败');
-
-      const res = await cloudRequest.callContainer({
-        path: '/api/auth/bind',
-        method: 'POST',
-        data: { account: phoneOnly, password: phoneOnlyPassword, code: loginRes.code },
-      });
-      wx.setStorageSync('preventSilentLogin', true);
-      this.onLoginSuccess(res);
-    } catch (err) {
-      this._handleLoginError(err);
-    }
+    await this._doBindLogin(phoneOnly, phoneOnlyPassword, { preventSilent: true });
   },
 
   async handleOwnPasswordLogin() {
@@ -378,22 +362,7 @@ Page({
       return;
     }
     this.setData({ loading: true, errorMsg: '' });
-    try {
-      const loginRes = await new Promise((resolve, reject) => {
-        wx.login({ success: resolve, fail: reject });
-      });
-      if (!loginRes.code) throw new Error('获取微信凭证失败');
-
-      const res = await cloudRequest.callContainer({
-        path: '/api/auth/bind',
-        method: 'POST',
-        data: { account: ownAccount, password: ownPassword, code: loginRes.code },
-      });
-      wx.setStorageSync('preventSilentLogin', true);
-      this.onLoginSuccess(res);
-    } catch (err) {
-      this._handleLoginError(err);
-    }
+    await this._doBindLogin(ownAccount, ownPassword, { preventSilent: true });
   },
 
   async handleBindLogin() {
@@ -408,6 +377,20 @@ Page({
       return;
     }
     this.setData({ loading: true, errorMsg: '' });
+    await this._doBindLogin(account, password, { preventSilent: false, clearLogoutPhone: true });
+  },
+
+  /**
+   * 统一的绑定登录函数：处理绑定冲突弹窗 + force_bind/skip_bind
+   * @param {string} account - 手机号
+   * @param {string} password - 密码
+   * @param {object} options - 额外参数
+   * @param {boolean} options.preventSilent - 登录成功后是否禁止静默
+   * @param {boolean} options.clearLogoutPhone - 是否清除退出记录
+   */
+  async _doBindLogin(account, password, options = {}) {
+    const { preventSilent = false, clearLogoutPhone = false } = options;
+
     try {
       const loginRes = await new Promise((resolve, reject) => {
         wx.login({ success: resolve, fail: reject });
@@ -419,10 +402,79 @@ Page({
         method: 'POST',
         data: { account, password, code: loginRes.code },
       });
-      wx.setStorageSync('preventSilentLogin', false);
-      wx.setStorageSync('lastLogoutPhone', '');
+
+      // 登录成功
+      if (preventSilent) wx.setStorageSync('preventSilentLogin', true);
+      if (clearLogoutPhone) wx.setStorageSync('lastLogoutPhone', '');
       this.onLoginSuccess(res);
     } catch (err) {
+      // 检测设备绑定冲突（409 DEVICE_BOUND）
+      if (err?.statusCode === 409) {
+        const detail = err?.data?.detail || {};
+        if (detail && detail.code === 'DEVICE_BOUND') {
+          const boundUser = detail.bound_user || {};
+          const boundPhone = boundUser.phone_masked || '其他账号';
+          const boundNickname = boundUser.nickname || '';
+          const displayName = boundNickname
+            ? `${boundNickname}(${boundPhone})`
+            : boundPhone;
+
+          wx.showModal({
+            title: '设备已绑定账号',
+            content: `当前设备已绑定账号 ${displayName}，是否改绑为当前账号？`,
+            confirmText: '改绑',
+            cancelText: '保留原绑定',
+            success: async (modalRes) => {
+              if (modalRes.confirm) {
+                // 确认改绑：携带 force_bind 重试
+                try {
+                  const loginRes2 = await new Promise((resolve, reject) => {
+                    wx.login({ success: resolve, fail: reject });
+                  });
+                  if (!loginRes2.code) {
+                    this.setData({ errorMsg: '获取微信凭证失败', loading: false });
+                    return;
+                  }
+                  const res2 = await cloudRequest.callContainer({
+                    path: '/api/auth/bind',
+                    method: 'POST',
+                    data: { account, password, code: loginRes2.code, force_bind: true },
+                  });
+                  if (preventSilent) wx.setStorageSync('preventSilentLogin', true);
+                  if (clearLogoutPhone) wx.setStorageSync('lastLogoutPhone', '');
+                  this.onLoginSuccess(res2);
+                } catch (retryErr) {
+                  this._handleLoginError(retryErr);
+                }
+              } else {
+                // 拒绝改绑：携带 skip_bind 登录（不更新openid）
+                try {
+                  const loginRes2 = await new Promise((resolve, reject) => {
+                    wx.login({ success: resolve, fail: reject });
+                  });
+                  if (!loginRes2.code) {
+                    this.setData({ errorMsg: '获取微信凭证失败', loading: false });
+                    return;
+                  }
+                  const res2 = await cloudRequest.callContainer({
+                    path: '/api/auth/bind',
+                    method: 'POST',
+                    data: { account, password, code: loginRes2.code, skip_bind: true },
+                  });
+                  if (preventSilent) wx.setStorageSync('preventSilentLogin', true);
+                  if (clearLogoutPhone) wx.setStorageSync('lastLogoutPhone', '');
+                  this.onLoginSuccess(res2);
+                } catch (retryErr) {
+                  this._handleLoginError(retryErr);
+                }
+              }
+            },
+          });
+          return;
+        }
+      }
+
+      // 其他错误走通用处理
       this._handleLoginError(err);
     }
   },

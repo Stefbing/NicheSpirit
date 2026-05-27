@@ -761,3 +761,240 @@
 .share-cancel-btn:active {
   transform: scale(0.98);
 }
+
+/* ========== 体脂秤权限说明弹窗 ========== */
+.scale-permission-box {
+  text-align: center;
+  padding: 48rpx 36rpx 36rpx;
+}
+
+.scale-perm-icon {
+  font-size: 80rpx;
+  margin-bottom: 20rpx;
+}
+
+.scale-perm-desc {
+  font-size: 26rpx;
+  color: #6B7280;
+  line-height: 1.7;
+  text-align: left;
+  margin-bottom: 28rpx;
+}
+
+.scale-perm-tips {
+  background: #F8FAFC;
+  border-radius: 16rpx;
+  padding: 28rpx 24rpx;
+  margin-bottom: 36rpx;
+  text-align: left;
+}
+
+.perm-tip-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12rpx;
+  margin-bottom: 16rpx;
+}
+
+.perm-tip-row:last-child {
+  margin-bottom: 0;
+}
+
+.tip-bullet {
+  font-size: 24rpx;
+  color: #3B82F6;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.tip-text {
+  font-size: 24rpx;
+  color: #4B5563;
+  line-height: 1.5;
+}
+
+.scale-bind-btn {
+  margin-top: 0;
+  margin-bottom: 16rpx;
+}
+
+/* ========== 体脂秤扫描弹窗 ========== */
+.scale-scan-box {
+  max-height: 75vh;
+  display: flex;
+  flex-direction: column;
+  padding: 32rpx 32rpx 24rpx;
+}
+
+.scan-header {
+  text-align: center;
+  padding-bottom: 24rpx;
+}
+
+.scan-icon {
+  font-size: 64rpx;
+  margin-bottom: 12rpx;
+  display: inline-block;
+}
+
+.scan-icon.scanning-anim {
+  animation: scanPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes scanPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.15); opacity: 0.7; }
+}
+
+.scale-scan-hint {
+  display: block;
+  font-size: 24rpx;
+  color: #9CA3AF;
+  margin-top: 8rpx;
+}
+
+/* 设备列表 */
+.scale-device-list {
+  max-height: 400rpx;
+  overflow-y: auto;
+  margin-bottom: 24rpx;
+  -webkit-overflow-scrolling: touch;
+}
+
+.no-devices {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 48rpx 0;
+}
+
+.no-devices-icon {
+  font-size: 48rpx;
+  margin-bottom: 12rpx;
+}
+
+.no-devices-text {
+  font-size: 26rpx;
+  color: #9CA3AF;
+  margin-bottom: 24rpx;
+}
+
+.retry-btn {
+  font-size: 26rpx;
+  color: #3B82F6;
+  background: #EFF6FF;
+  border-radius: 12rpx;
+  padding: 12rpx 36rpx;
+  border: none;
+  line-height: 1;
+  height: auto;
+}
+
+.retry-btn::after { border: none; }
+.retry-btn:active { opacity: 0.7; }
+
+/* 设备条目 */
+.device-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24rpx 20rpx;
+  border-radius: 16rpx;
+  background: #F8FAFC;
+  margin-bottom: 12rpx;
+  transition: all 0.2s;
+}
+
+.device-item:active {
+  background: #EFF6FF;
+  transform: scale(0.98);
+}
+
+.device-item.device-duplicate {
+  opacity: 0.6;
+}
+
+.device-item-left {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  flex: 1;
+  min-width: 0;
+}
+
+.device-item-icon {
+  font-size: 40rpx;
+  width: 64rpx;
+  height: 64rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #D1FAE5 0%, #A7F3D0 100%);
+  border-radius: 14rpx;
+  flex-shrink: 0;
+}
+
+.device-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.device-item-name {
+  font-size: 28rpx;
+  font-weight: 600;
+  color: #1F2937;
+  display: block;
+  margin-bottom: 4rpx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-item-meta {
+  font-size: 22rpx;
+  color: #9CA3AF;
+}
+
+.device-item-right {
+  flex-shrink: 0;
+  margin-left: 16rpx;
+}
+
+.duplicate-tag {
+  font-size: 22rpx;
+  color: #EF4444;
+  background: #FEF2F2;
+  padding: 4rpx 16rpx;
+  border-radius: 8rpx;
+  font-weight: 500;
+}
+
+/* 信号强度柱状图 */
+.signal-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3rpx;
+  height: 32rpx;
+}
+
+.signal-bar {
+  width: 8rpx;
+  border-radius: 2rpx;
+  background: #E5E7EB;
+  transition: all 0.3s;
+}
+
+.signal-bar:nth-child(1) { height: 8rpx; }
+.signal-bar:nth-child(2) { height: 14rpx; }
+.signal-bar:nth-child(3) { height: 22rpx; }
+.signal-bar:nth-child(4) { height: 32rpx; }
+
+.signal-bar.active {
+  background: #10B981;
+}
+
+.scan-footer {
+  padding-top: 8rpx;
+}
+
+

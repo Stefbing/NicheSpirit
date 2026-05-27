@@ -16,6 +16,12 @@ Page({
     devicePassword: '',
     greeting: '',
     devicesLoaded: false,
+    // 体脂秤绑定流程
+    showScalePermissionDialog: false,
+    showScaleScanningDialog: false,
+    scaleScanning: false,
+    scaleDiscoveredDevices: [],
+    scaleScanHelp: '',
     // 分享相关
     showShareConfirm: false,
     showAcceptShare: false,
@@ -69,22 +75,9 @@ Page({
     if (this.data.userInfo) {
       this.registerDeviceStatusListener();
 
-      const app = getApp();
-      if (!app.globalData.cachedDashboardData && this.data.devicesLoaded) {
-        console.log('[首页] 🔄 检测到缓存已清除，重新加载设备数据');
-        this.loadUserDevices();
-      } else if (this.data.devicesLoaded && app.globalData.cachedDashboardData) {
-        const cachedData = app.globalData.cachedDashboardData;
-        const hasXiaomiConfig = cachedData.xiaomi_config || false;
-        const hasScaleStats = cachedData.scale_stats && typeof cachedData.scale_stats === 'object' && 'today_count' in cachedData.scale_stats;
-
-        if (hasXiaomiConfig && !hasScaleStats) {
-          console.warn('[首页] ⚠️ 缓存数据不完整，强制刷新');
-          app.globalData.cachedDashboardData = null;
-          app.globalData.dashboardCacheTime = 0;
-          this.loadUserDevices();
-        }
-      }
+      // 每次页面显示都重新加载设备列表（防缓存/并发导致数据未及时渲染）
+      console.log('[首页] 🔄 页面显示，刷新设备列表');
+      this.loadUserDevices();
     }
   },
   
@@ -205,130 +198,107 @@ Page({
       const petDevices = []
       const healthDevices = []
       const userDevices = []
-      
-      // 处理 CloudPets 喂食机（仅当有实际配置数据时显示）
-      const hasCloudPetsConfig = dashboardData.cloudpets_servings && 
-                                 Object.keys(dashboardData.cloudpets_servings).length > 0
-      if (hasCloudPetsConfig) {
-        const feederDevice = {
-          device_key: 'cloudpets_cloudpets',
-          device_type: 'feeder',
-          device_name: 'cloudpets',
-          display_name: '喂食机',
-          platform: 'cloudpets',
-          status: 'active'
-        }
-        // 解析今日投喂次数 - 使用 result 字段
-        const servingsData = dashboardData.cloudpets_servings
-        if (servingsData && typeof servingsData === 'object') {
-          feederDevice.today_servings = servingsData.result || 0
-        } else if (typeof servingsData === 'number') {
-          feederDevice.today_servings = servingsData
-        } else {
-          feederDevice.today_servings = 0
-        }
-        
-        // 计算计划剩余数量 - 只计算当前时间之后的启用计划
-        const plans = dashboardData.cloudpets_plans || []
-        if (Array.isArray(plans)) {
-          // 获取当前时间 HH:mm
-          const now = new Date()
-          const currentMinutes = now.getHours() * 60 + now.getMinutes()
-          
-          let remaining = 0
-          plans.forEach(p => {
-            // 确保 plan 结构中有 time 且 enabled
-            if (p.time && p.enabled !== false && p.enabled !== 0 && p.enabled !== '0') {
-              const [h, m] = p.time.split(':').map(Number)
-              const planMinutes = h * 60 + m
-              if (planMinutes > currentMinutes) {
-                remaining++
-              }
-            }
-          })
-          
-          feederDevice.remaining_plans = remaining
-        } else {
-          feederDevice.remaining_plans = 0
-        }
-        
-        petDevices.push(feederDevice)
-        userDevices.push(feederDevice)
-      }
-      
-      // 处理 PetKit 猫厕所
-      const petkitDevices = dashboardData.petkit_devices || []
-      if (petkitDevices.length > 0) {
-        const litterboxDevice = {
-          device_key: 'petkit_petkit',
-          device_type: 'litterbox',
-          device_name: 'petkit',
-          display_name: '猫厕所',
-          platform: 'petkit',
-          status: 'active'
-        }
-        const litterboxStats = dashboardData.litterbox_stats || {}
-        
-        // 查找第一个猫厕所设备（与Web端一致）
-        const litterboxPetkitDevice = petkitDevices.find(d => {
-          if (!d || !d.type) return false
-          const name = d.name || ''
-          return ['T3', 'T4', 'T4 Pura MAX', 'T5'].includes(d.type) || name.includes('MAX')
-        })
-        
-        if (litterboxPetkitDevice) {
-          // 优先使用缓存的统计数据（与Web端一致）
-          let stats = {}
-          if (litterboxStats[litterboxPetkitDevice.id]) {
-            stats = litterboxStats[litterboxPetkitDevice.id]
-          } else if (litterboxPetkitDevice.state_summary) {
-            stats = litterboxPetkitDevice.state_summary
+
+      // 从 device_platforms（缓存分组）渲染设备卡片
+      const platforms = dashboardData.device_platforms || []
+
+      for (const plat of platforms) {
+        if (plat.is_ble) {
+          // 体脂秤 — 本地蓝牙设备
+          const scaleDevice = {
+            device_key: plat.device_key,
+            device_type: 'scale',
+            device_name: plat.device_name,
+            display_name: plat.device_name || 'MIBFS',
+            platform: plat.platform,
+            status: 'active',
+            online: false,
+            today_measurements: 0,
+            latest_body_fat: null,
           }
-          
-          // 今日如厕次数 - 只使用 today_visits，不使用 used_times（累计值）
-          litterboxDevice.today_visits = stats.today_visits !== undefined ? stats.today_visits : 0
-          
-          // 猫砂余量百分比
-          litterboxDevice.sand_level = stats.sand_percent || 0
-        } else {
-          litterboxDevice.today_visits = 0
-          litterboxDevice.sand_level = 0
+
+          const scaleStats = dashboardData.scale_stats
+          if (scaleStats && typeof scaleStats === 'object' && 'today_count' in scaleStats) {
+            scaleDevice.today_measurements = scaleStats.today_count || 0
+            scaleDevice.latest_body_fat = scaleStats.latest_body_fat !== undefined ? scaleStats.latest_body_fat : null
+          }
+
+          healthDevices.push(scaleDevice)
+          userDevices.push(scaleDevice)
+
+        } else if (plat.platform === 'cloudpets') {
+          // CloudPets 喂食机 — 云设备，需要有实际投喂数据才渲染
+          const hasServings = dashboardData.cloudpets_servings &&
+            Object.keys(dashboardData.cloudpets_servings).length > 0
+          if (!hasServings) continue
+
+          const feederDevice = {
+            device_key: plat.device_key,
+            device_type: 'feeder',
+            device_name: plat.device_name,
+            display_name: plat.device_name || '喂食机',
+            platform: plat.platform,
+            status: 'active',
+          }
+
+          const servingsData = dashboardData.cloudpets_servings
+          feederDevice.today_servings = (servingsData && typeof servingsData === 'object')
+            ? (servingsData.result || 0) : (typeof servingsData === 'number' ? servingsData : 0)
+
+          const plans = dashboardData.cloudpets_plans || []
+          if (Array.isArray(plans)) {
+            const now = new Date()
+            const currentMinutes = now.getHours() * 60 + now.getMinutes()
+            let remaining = 0
+            plans.forEach(p => {
+              if (p.time && p.enabled !== false && p.enabled !== 0 && p.enabled !== '0') {
+                const [h, m] = p.time.split(':').map(Number)
+                if ((h * 60 + m) > currentMinutes) remaining++
+              }
+            })
+            feederDevice.remaining_plans = remaining
+          } else {
+            feederDevice.remaining_plans = 0
+          }
+
+          petDevices.push(feederDevice)
+          userDevices.push(feederDevice)
+
+        } else if (plat.platform === 'petkit') {
+          // PetKit 猫厕所 — 云设备，需要 API 返回的数据
+          const petkitDevices = dashboardData.petkit_devices || []
+          if (petkitDevices.length === 0) continue
+
+          const litterboxDevice = {
+            device_key: plat.device_key,
+            device_type: 'litterbox',
+            device_name: plat.device_name,
+            display_name: plat.device_name || '猫厕所',
+            platform: plat.platform,
+            status: 'active',
+          }
+
+          const litterboxStats = dashboardData.litterbox_stats || {}
+          const found = petkitDevices.find(d => {
+            if (!d || !d.type) return false
+            const name = d.name || ''
+            return ['T3', 'T4', 'T4 Pura MAX', 'T5'].includes(d.type) || name.includes('MAX')
+          })
+
+          if (found) {
+            let stats = {}
+            if (litterboxStats[found.id]) stats = litterboxStats[found.id]
+            else if (found.state_summary) stats = found.state_summary
+            litterboxDevice.today_visits = stats.today_visits !== undefined ? stats.today_visits : 0
+            litterboxDevice.sand_level = stats.sand_percent || 0
+          } else {
+            litterboxDevice.today_visits = 0
+            litterboxDevice.sand_level = 0
+          }
+
+          petDevices.push(litterboxDevice)
+          userDevices.push(litterboxDevice)
         }
-        
-        petDevices.push(litterboxDevice)
-        userDevices.push(litterboxDevice)
-      }
-      
-      // 处理小米体脂秤（检查是否有配置）
-      const hasXiaomiConfig = dashboardData.xiaomi_config || false
-      if (hasXiaomiConfig) {
-        const scaleDevice = {
-          device_key: 'xiaomi_xiaomi',
-          device_type: 'scale',
-          device_name: 'xiaomi',
-          display_name: 'MIBFS', // 首页显示短名称
-          platform: 'xiaomi',
-          status: 'active',
-          online: false, // 默认离线，后续通过蓝牙状态更新
-          today_measurements: 0, // 今日测量次数
-          latest_body_fat: null // 最新体脂率
-        }
-        
-        // 从 dashboardData 中获取体脂秤统计数据
-        const scaleStats = dashboardData.scale_stats
-        console.log('[首页] 📊 体脂秤统计数据:', scaleStats)
-        
-        // 【修复】只有当 scale_stats 存在且包含有效字段时才使用
-        if (scaleStats && typeof scaleStats === 'object' && 'today_count' in scaleStats) {
-          scaleDevice.today_measurements = scaleStats.today_count || 0
-          scaleDevice.latest_body_fat = scaleStats.latest_body_fat !== undefined ? scaleStats.latest_body_fat : null
-          console.log('[首页] ✅ 体脂秤数据 - 今日测量:', scaleDevice.today_measurements, '体脂率:', scaleDevice.latest_body_fat)
-        } else {
-          console.warn('[首页] ⚠️ scale_stats 数据缺失或格式错误，使用默认值')
-        }
-        
-        healthDevices.push(scaleDevice)
-        userDevices.push(scaleDevice)
       }
       
       this.setData({
@@ -368,7 +338,16 @@ Page({
       'litterbox': '猫厕所',
       'scale': '体脂秤'
     }
-    
+
+    if (type === 'scale') {
+      // 体脂秤：启动本地蓝牙绑定流程
+      this.setData({
+        showAddDeviceDialog: false,
+        showScalePermissionDialog: true,
+      })
+      return
+    }
+
     this.setData({
       selectedDeviceType: type,
       selectedPlatform: platform,
@@ -403,7 +382,8 @@ Page({
   async onSubmitDeviceConfig() {
     const { selectedDeviceType, selectedPlatform, deviceAccount, devicePassword } = this.data
     
-    if (!deviceAccount || !devicePassword) {
+    // 体脂秤为本地设备，无需云账号密码
+    if (selectedDeviceType !== 'scale' && (!deviceAccount || !devicePassword)) {
       wx.showToast({ title: '请填写完整信息', icon: 'none' })
       return
     }
@@ -417,16 +397,14 @@ Page({
         data: {
           device_type: selectedDeviceType,
           platform: selectedPlatform,
-          account: deviceAccount,
-          password: devicePassword
+          account: selectedDeviceType === 'scale' ? 'local' : deviceAccount,
+          password: selectedDeviceType === 'scale' ? 'local' : devicePassword
         }
       })
       
-      // 如果是体脂秤，自动初始化“自己”成员
+      // 如果是体脂秤，自动初始化"自己"成员
       if (selectedDeviceType === 'scale') {
         await this.initScaleSelfMember()
-        
-        // 体脂秤添加成功后，立即初始化蓝牙
         console.log('[首页] 体脂秤添加成功，立即初始化蓝牙')
         app.checkAndInitBluetooth()
       }
@@ -435,19 +413,26 @@ Page({
       wx.showToast({ title: '添加成功', icon: 'success' })
       
       this.closeDeviceConfigModal()
-      // 添加设备后刷新设备列表
       await this.loadUserDevices()
     } catch (err) {
       wx.hideLoading()
       console.error('添加设备失败:', err)
-      wx.showToast({ title: '添加失败，请重试', icon: 'none' })
+
+      const errData = err && err.data
+      wx.showModal({
+        title: '添加失败',
+        content: (errData && errData.detail) || '请检查账号密码后重试',
+        showCancel: false,
+      })
     }
   },
 
-  // 初始化体脂秤的“自己”成员
+
+
+  // 初始化体脂秤的"自己"成员
   async initScaleSelfMember() {
     try {
-      // 先检查是否已有“自己”成员
+      // 先检查是否已有"自己"成员
       const res = await cloudRequest.callContainer({
         path: `/api/family-members?user_id=${this.data.userInfo.user_id}`,
         method: 'GET'
@@ -456,7 +441,7 @@ Page({
       const members = Array.isArray(res.data) ? res.data : (Array.isArray(res) ? res : [])
       const hasSelf = members.some(m => m.relationship === 'self')
       
-      // 如果没有“自己”成员，创建默认成员
+      // 如果没有"自己"成员，创建默认成员
       if (!hasSelf) {
         await cloudRequest.callContainer({
           path: `/api/family-members?user_id=${this.data.userInfo.user_id}`,
@@ -470,12 +455,205 @@ Page({
             relationship: 'self'
           }
         })
-        console.log('✓ 已自动初始化体脂秤“自己”成员')
+        console.log('✓ 已自动初始化体脂秤"自己"成员')
       }
     } catch (err) {
       console.error('初始化体脂秤成员失败:', err)
       // 不阻断流程，仅记录错误
     }
+  },
+
+  // ==================== 体脂秤蓝牙绑定流程 ====================
+
+  // 关闭权限说明弹窗
+  closeScalePermissionDialog() {
+    this.setData({ showScalePermissionDialog: false })
+    this.cleanupScaleScan()
+  },
+
+  // 授权蓝牙并开始扫描
+  async authorizeAndScan() {
+    this.setData({ showScalePermissionDialog: false })
+    wx.showLoading({ title: '启动蓝牙...', mask: true })
+
+    try {
+      const app = getApp()
+      await app.checkAndInitBluetooth(this.data.userInfo.user_id)
+      wx.hideLoading()
+      this.startScaleScan()
+    } catch (err) {
+      wx.hideLoading()
+      const errMsg = (err && err.errMsg) || ''
+      // 开发者工具不支持蓝牙
+      if (errMsg.indexOf('not available') !== -1) {
+        wx.showModal({
+          title: '当前环境不支持蓝牙',
+          content: '微信开发者工具不支持蓝牙功能，请使用真机（手机）扫码预览测试。\n\n已为您进入扫码模式，请用手机扫码后重新添加体脂秤。',
+          showCancel: false,
+        })
+      } else {
+        wx.showModal({
+          title: '蓝牙启动失败',
+          content: '请确保手机蓝牙已开启，并在系统设置中授予蓝牙权限后重试',
+          showCancel: false,
+        })
+      }
+    }
+  },
+
+  // 开始扫描体脂秤设备
+  startScaleScan() {
+    const app = getApp()
+    app.clearDiscoveredDevices()
+    // 绑定阶段抑制蓝牙数据自动跳转称重页
+    app.globalData.suppressScaleAutoNavigate = true
+
+    this.setData({
+      showScaleScanningDialog: true,
+      scaleScanning: true,
+      scaleDiscoveredDevices: [],
+      scaleScanHelp: '正在扫描体脂秤设备...',
+    })
+
+    // 订阅设备发现事件
+    this._discoveryUnsub = app.subscribeDeviceDiscovery((devices) => {
+      this._filterDiscoveredDevices(devices)
+    })
+
+    // 10秒后自动结束扫描
+    this._scanTimeout = setTimeout(() => {
+      if (!this.data.scaleScanning) return
+      const count = this.data.scaleDiscoveredDevices.length
+      this.setData({
+        scaleScanning: false,
+        scaleScanHelp: count > 0
+          ? '请选择上方设备完成绑定'
+          : '未发现体脂秤设备，请确保设备已开机并靠近手机',
+      })
+    }, 10000)
+  },
+
+  // 过滤已发现的设备（剔除已绑定的）—— 已绑定ID缓存5秒避免高频请求
+  _boundDeviceCache: { ids: [], time: 0 },
+
+  async _getBoundDeviceIds(userId) {
+    const now = Date.now()
+    if (this._boundDeviceCache && (now - this._boundDeviceCache.time < 5000)) {
+      return this._boundDeviceCache.ids
+    }
+    let boundIds = []
+    try {
+      const boundRes = await cloudRequest.callContainer({
+        path: `/api/devices/scale/bound?user_id=${userId}`,
+        method: 'GET',
+      })
+      if (boundRes && boundRes.bound && boundRes.device_id) {
+        boundIds = [boundRes.device_id.toLowerCase()]
+      }
+    } catch (e) {
+      console.warn('[绑定] 获取已绑定设备ID失败:', e)
+    }
+    this._boundDeviceCache = { ids: boundIds, time: now }
+    return boundIds
+  },
+
+  async _filterDiscoveredDevices(devices) {
+    const boundDeviceIds = await this._getBoundDeviceIds(this.data.userInfo.user_id)
+
+    const filtered = devices
+      .filter(d => d.deviceId && d.name)
+      .map(d => ({
+        deviceId: d.deviceId,
+        name: d.name,
+        RSSI: d.RSSI || -100,
+        lastSeen: d.lastSeen || Date.now(),
+        isDuplicate: boundDeviceIds.includes(d.deviceId.toLowerCase()),
+        signalBars: d.RSSI > -60 ? 4 : d.RSSI > -75 ? 3 : d.RSSI > -85 ? 2 : 1,
+      }))
+      .sort((a, b) => b.RSSI - a.RSSI)
+
+    this.setData({ scaleDiscoveredDevices: filtered })
+  },
+
+  // 选择并绑定体脂秤设备
+  async confirmBindScale(e) {
+    const deviceId = e.currentTarget.dataset.deviceId
+    const deviceName = e.currentTarget.dataset.deviceName
+    const isDuplicate = e.currentTarget.dataset.duplicate === 'true'
+
+    // 防重复校验（前端快速拦截）
+    if (isDuplicate) {
+      wx.showModal({
+        title: '无法重复添加',
+        content: '该蓝牙设备已在您的账户中绑定，无法重复添加同一蓝牙设备',
+        showCancel: false,
+      })
+      return
+    }
+
+    wx.showLoading({ title: '绑定中...', mask: true })
+
+    try {
+      await cloudRequest.callContainer({
+        path: `/api/devices/scale/bind?user_id=${this.data.userInfo.user_id}`,
+        method: 'POST',
+        data: {
+          device_id: deviceId,
+          device_name: deviceName,
+        },
+      })
+
+      // 初始化"自己"成员
+      await this.initScaleSelfMember()
+
+      wx.hideLoading()
+      wx.showToast({ title: '绑定成功', icon: 'success' })
+
+      // 清理扫描并关闭弹窗
+      this.cleanupScaleScan()
+      this.setData({ showScaleScanningDialog: false })
+
+      // 刷新设备列表
+      const app = getApp()
+      app.globalData.cachedDashboardData = null
+      app.globalData.dashboardCacheTime = 0
+      await this.loadUserDevices()
+    } catch (err) {
+      wx.hideLoading()
+      const errData = err && err.data
+      const errMsg = (errData && errData.detail) || '绑定失败，请重试'
+
+      if (errData && err.status === 409) {
+        wx.showModal({
+          title: '无法重复添加',
+          content: errMsg,
+          showCancel: false,
+        })
+      } else {
+        wx.showToast({ title: errMsg, icon: 'none' })
+      }
+    }
+  },
+
+  // 关闭扫描弹窗
+  closeScaleScanDialog() {
+    this.cleanupScaleScan()
+    this.setData({ showScaleScanningDialog: false })
+  },
+
+  // 清理扫描资源
+  cleanupScaleScan() {
+    if (this._discoveryUnsub) {
+      this._discoveryUnsub()
+      this._discoveryUnsub = null
+    }
+    if (this._scanTimeout) {
+      clearTimeout(this._scanTimeout)
+      this._scanTimeout = null
+    }
+    // 恢复自动跳转
+    const app = getApp()
+    app.globalData.suppressScaleAutoNavigate = false
   },
 
   // 阻止事件冒泡
@@ -495,7 +673,7 @@ Page({
     
     wx.showModal({
       title: '删除设备',
-      content: `确定要删除“${deviceName}”吗？\n删除后需要重新配置账号密码。`,
+      content: `确定要删除"${deviceName}"吗？\n删除后需要重新配置账号密码。`,
       confirmText: '删除',
       confirmColor: '#ff4d4f',
       cancelText: '取消',
@@ -531,11 +709,13 @@ Page({
       }
       
       // 删除设备配置
-      await cloudRequest.callContainer({
+      const result = await cloudRequest.callContainer({
         path: `/api/devices/${deviceKey}?user_id=${this.data.userInfo.user_id}`,
         method: 'DELETE'
       })
       
+      console.log('[首页] 删除结果:', result)
+
       // 更新本地userInfo的has_configured状态
       const userInfo = wx.getStorageSync('userInfo');
       if (userInfo) {
@@ -545,6 +725,11 @@ Page({
       
       wx.hideLoading()
       wx.showToast({ title: '删除成功', icon: 'success' })
+
+      // 【修复】清除 app 层 dashboard 缓存，确保删除后立即刷新
+      const app = getApp();
+      app.globalData.cachedDashboardData = null
+      app.globalData.dashboardCacheTime = 0
       
       // 刷新设备列表
       await this.loadUserDevices()
@@ -552,7 +737,7 @@ Page({
       wx.hideLoading()
       console.error('删除设备失败:', err)
       wx.showToast({ 
-        title: err.errMsg || '删除失败', 
+        title: (err && err.data && err.data.detail) || err.errMsg || '删除失败', 
         icon: 'error',
         duration: 2000
       })
@@ -663,7 +848,10 @@ Page({
       clearInterval(this.deviceStatusTimer);
       this.deviceStatusTimer = null;
     }
-    
+
+    // 清理体脂秤绑定扫描
+    this.cleanupScaleScan()
+
     // 注意：不在这里停止蓝牙扫描
     // 保持扫描运行，供其他页面使用
   },

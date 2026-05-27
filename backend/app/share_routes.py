@@ -181,6 +181,13 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
     session.add(share)
     session.commit()
 
+    # 清除接受者的设备缓存
+    try:
+        from .utils.device_cache import device_cache
+        await device_cache.invalidate_user(request.to_user_id)
+    except Exception:
+        pass
+
     return {
         "success": True,
         "message": "分享接受成功",
@@ -231,5 +238,13 @@ async def revoke_share(share_id: int, user_id: int, session: Session = Depends(g
     share.status = "revoked"
     session.add(share)
     session.commit()
+
+    # 清除被分享者的设备缓存
+    if share.to_user_id:
+        try:
+            from .utils.device_cache import device_cache
+            await device_cache.invalidate_user(share.to_user_id)
+        except Exception:
+            pass
 
     return {"success": True, "message": "分享已撤销"}

@@ -689,9 +689,27 @@ Page({
       });
 
       if (candidates.length === 0) {
-        // 无匹配，弹出创建
-        this.showCreateMemberModal(weight);
-        resolve(false);
+        // 无匹配
+        if (this.data.members.length === 1) {
+          // 【优化】仅有一个成员时，自动匹配，不弹创建窗口
+          const onlyMember = this.data.members[0];
+          console.log('[Scale] ✅ 仅一个成员，自动匹配:', onlyMember.name, `体重 ${weight}kg`);
+          this.setData({
+            matchedMember: onlyMember,
+            selectedMemberId: onlyMember.id,
+            currentMember: {
+              height: onlyMember.height,
+              age: onlyMember.age,
+              gender: onlyMember.gender
+            }
+          }, () => {
+            resolve(true);
+          });
+        } else {
+          this.showCreateMemberModal(weight);
+          resolve(false);
+          return;
+        }
         return;
       }
 
@@ -788,13 +806,35 @@ Page({
   },
 
 // ==========================================
-// 小米体脂秤2 BIA算法 - 深度优化版 (兼容小米云API)
+// 体脂秤2 BIA算法 - 深度优化版
 // ==========================================
   async calculateBodyMetrics(weight, impedance = 0) {
     const { height, age, gender } = this.data.currentMember;
 
-    // 1. 基础校验与变量初始化
-    if (!height || !age || height <= 0 || age <= 0 || weight <= 0) return;
+    // 如果成员缺少身高/年龄，弹出编辑窗口让用户补全
+    if (!height || !age || height <= 0 || age <= 0 || weight <= 0) {
+      console.warn('[Scale] ⚠️ 成员缺少身高或年龄，弹出编辑窗口');
+      // 找到当前成员并打开编辑弹窗
+      const matchedId = this.data.selectedMemberId;
+      const matchedMember = this.data.members.find(m => m.id === matchedId);
+      if (matchedMember) {
+        this.setData({
+          showAddMemberDialog: true,
+          editingMemberId: matchedMember.id,
+          newMemberName: matchedMember.name || '',
+          newMemberAge: String(matchedMember.age || ''),
+          newMemberHeight: String(matchedMember.height || ''),
+          newMemberGender: matchedMember.gender || 'male',
+          newMemberGenderIndex: matchedMember.gender === 'female' ? 1 : 0,
+        });
+      }
+      this.setData({
+        bmi: null, bodyFat: null, water: null, muscleMass: null,
+        protein: null, bmr: null, visceralFat: null, boneMass: null,
+        bodyFatMissingData: true,
+      });
+      return;
+    }
 
     const isMale = gender === 'male';
     const heightCm = height;
@@ -833,7 +873,7 @@ Page({
     // 反算最终 FFM (由于受体脂约束影响)
     const finalFFM = weight * (1 - bodyFat / 100);
 
-    // 5. 核心指标导出 (适配小米云 API 要求)
+    // 5. 核心指标导出
 
     // 【水分率】修正逻辑：水分占去脂体重的约 73.2%
     // 这样算出来的数值会在 55%-65% 左右，符合人类生理
@@ -864,7 +904,7 @@ Page({
       bmi: parseFloat(bmi.toFixed(2)),
       bodyFat: parseFloat(bodyFat.toFixed(1)),
 
-      // 以下为适配小米云手动填写的字段
+      // 体脂相关字段
       water: parseFloat(waterPercent.toFixed(1)),      // 水分 %
       muscleRate: parseFloat(musclePercent.toFixed(1)), // 肌肉率 % (新增字段适配上传)
       muscleMass: parseFloat(muscleMass.toFixed(2)),   // 肌肉量 kg (保留UI展示)
@@ -889,8 +929,8 @@ Page({
       bodyFatNormalRange: isMale ? '10-20%' : '18-28%'
     });
 
-    // 控制台输出用于 Debug API 联调
-    console.log('[Scale API Sync] 准备上传至小米云:', {
+    // 控制台输出体脂数据
+    console.log('[Body Metrics] 计算结果:', {
       weight: weight + 'kg',
       bodyFat: bodyFat.toFixed(1) + '%',
       muscleRate: musclePercent.toFixed(1) + '%',
@@ -1084,15 +1124,15 @@ Page({
         console.log('[Scale] ✅ 自动保存成功:', res.message);
         this.setData({
           autoSaved: true,
-          saveCardClass: 'saved'
+          saveCardClass: 'saved',
         });
         wx.showToast({
           title: res.message || '保存成功',
           icon: 'success',
           duration: 1500
         });
-        
-        // 【关键】清除 dashboard 缓存，确保首页能看到最新数据
+
+        // 清除 dashboard 缓存，确保首页能看到最新数据
         const app = getApp();
         const userInfo = wx.getStorageSync('userInfo');
         if (userInfo && userInfo.user_id) {
@@ -1131,6 +1171,23 @@ Page({
     this.setData({ showAddMemberDialog: false });
   },
 
+  /**
+   * 编辑成员 — 打开弹窗并预填当前成员数据
+   */
+  editMember(memberId) {
+    const member = this.data.members.find(m => m.id === memberId);
+    if (!member) return;
+    this.setData({
+      showAddMemberDialog: true,
+      editingMemberId: member.id,
+      newMemberName: member.name || '',
+      newMemberAge: String(member.age || ''),
+      newMemberHeight: String(member.height || ''),
+      newMemberGender: member.gender || 'male',
+      newMemberGenderIndex: member.gender === 'female' ? 1 : 0,
+    });
+  },
+
   // ======================
   // 表单输入处理
   // ======================
@@ -1162,10 +1219,10 @@ Page({
   },
 
   // ======================
-  // 保存成员
+  // 保存成员（新建或编辑）
   // ======================
   async saveMember() {
-    const { newMemberName, newMemberAge, newMemberHeight, newMemberGender } = this.data;
+    const { newMemberName, newMemberAge, newMemberHeight, newMemberGender, editingMemberId } = this.data;
 
     if (!newMemberName || !newMemberAge || !newMemberHeight) {
       wx.showToast({ title: '请填写完整信息', icon: 'none' });
@@ -1175,34 +1232,54 @@ Page({
     const userInfo = wx.getStorageSync('userInfo');
     if (!userInfo || !userInfo.user_id) return;
 
+    const isEditing = !!editingMemberId;
+    // 编辑时保留原有关系，避免默认成员(self)的relationship被清空
+    const existingMember = isEditing ? this.data.members.find(m => m.id === editingMemberId) : null;
+    const memberData = {
+      name: newMemberName,
+      age: parseInt(newMemberAge),
+      height: parseFloat(newMemberHeight),
+      gender: newMemberGender,
+      avatar_color: existingMember?.avatar_color || '',
+      relationship: existingMember?.relationship || ''
+    };
+
     try {
-      const res = await new Promise((resolve, reject) => {
-        cloudRequest.callContainer({
-          path: `/api/family-members?user_id=${userInfo.user_id}`,
-          method: 'POST',
-          data: {
-            name: newMemberName,
-            age: parseInt(newMemberAge),
-            height: parseFloat(newMemberHeight),
-            gender: newMemberGender,
-            avatar_color: '',
-            relationship: ''
-          },
-          success: resolve,
-          fail: reject
+      let res;
+      if (isEditing) {
+        // 编辑已有成员 — 使用 PUT
+        res = await new Promise((resolve, reject) => {
+          cloudRequest.callContainer({
+            path: `/api/family-members/${editingMemberId}?user_id=${userInfo.user_id}`,
+            method: 'PUT',
+            data: memberData,
+            success: resolve,
+            fail: reject
+          });
         });
-      });
+        console.log('[Scale] ✅ 更新成员返回:', res);
+      } else {
+        // 新建成员 — 使用 POST
+        res = await new Promise((resolve, reject) => {
+          cloudRequest.callContainer({
+            path: `/api/family-members?user_id=${userInfo.user_id}`,
+            method: 'POST',
+            data: memberData,
+            success: resolve,
+            fail: reject
+          });
+        });
+        console.log('[Scale] ✅ 添加成员返回:', res);
+      }
 
-      console.log('[Scale] ✅ 添加成员返回:', res);
-
-      // 【修复】直接判断 res，不需要 res.data
-      if (res && res.id) {
-        wx.showToast({ title: '添加成功', icon: 'success' });
+      if (res && (res.id || isEditing)) {
+        const savedId = isEditing ? editingMemberId : res.id;
+        wx.showToast({ title: isEditing ? '更新成功' : '添加成功', icon: 'success' });
         this.closeAddMemberDialog();
 
-        // 【优化】局部更新成员列表，不清除全局缓存
-        const newMember = {
-          id: res.id,
+        // 局部更新成员列表
+        const updatedMember = {
+          id: savedId,
           name: newMemberName,
           age: parseInt(newMemberAge),
           height: parseFloat(newMemberHeight),
@@ -1211,10 +1288,33 @@ Page({
           last_weight: null
         };
 
-        const updatedMembers = [...this.data.members, newMember];
+        let updatedMembers;
+        const existingIndex = this.data.members.findIndex(m => m.id === savedId);
+        if (existingIndex >= 0) {
+          // 更新已有成员
+          updatedMembers = [...this.data.members];
+          updatedMembers[existingIndex] = { ...updatedMembers[existingIndex], ...updatedMember };
+        } else {
+          // 添加新成员
+          updatedMembers = [...this.data.members, updatedMember];
+        }
+
         this.setData({
           members: updatedMembers,
-          showMemberSection: true
+          showMemberSection: true,
+          // 如果当前选中的就是刚编辑的成员，同步更新 currentMember 以触发体脂重算
+          selectedMemberId: savedId,
+          currentMember: {
+            height: updatedMember.height,
+            age: updatedMember.age,
+            gender: updatedMember.gender,
+            name: updatedMember.name,
+          }
+        }, () => {
+          // 编辑完后如果有锁定数据，重新计算体脂
+          if (this.data.lockedWeight) {
+            this.calculateBodyMetrics(this.data.lockedWeight, this.data.lockedImpedance);
+          }
         });
 
         // 同步更新全局缓存

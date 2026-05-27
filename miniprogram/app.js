@@ -28,10 +28,6 @@ App({
     lastProcessedData: null,  // 上次处理的数据
     lastProcessedTimestamp: 0, // 上次处理的时间戳
 
-    // 小米配置检查缓存
-    xiaomiConfigChecked: false,
-    hasXiaomiConfig: false,
-
     // Dashboard数据缓存（避免重复请求）
     cachedDashboardData: null,
     dashboardCacheTime: 0,
@@ -44,7 +40,48 @@ App({
     lastTimeSyncTimestamp: 0,  // 上次执行时间同步的时间戳
     
     // 页面跳转锁
-    scalePageNavigationInFlight: false  // 防止重复跳转到称重页
+    scalePageNavigationInFlight: false,  // 防止重复跳转到称重页
+    suppressScaleAutoNavigate: false,  // 绑定阶段抑制自动跳转
+  },
+
+  // 已发现的体脂秤设备列表（供绑定界面使用）
+  _discoveredScaleDevices: {},  // { deviceId: { deviceId, name, RSSI, lastSeen } }
+  _deviceDiscoveryListeners: [],  // [{ callback, filter }]
+
+  /**
+   * 订阅蓝牙设备发现事件
+   * @param {Function} callback - 每次发现新设备时调用 (devices: Array) => void
+   * @returns {Function} 取消订阅函数
+   */
+  subscribeDeviceDiscovery(callback) {
+    if (typeof callback !== 'function') {
+      return function() {};
+    }
+    this._deviceDiscoveryListeners.push({ callback, filter: null });
+    // 立即通知已有设备列表
+    const devices = Object.values(this._discoveredScaleDevices);
+    if (devices.length > 0) {
+      try { callback(devices); } catch (e) { console.error('[Discovery] 回调失败:', e); }
+    }
+    return () => {
+      this._deviceDiscoveryListeners =
+        this._deviceDiscoveryListeners.filter(l => l.callback !== callback);
+    };
+  },
+
+  /**
+   * 取消订阅设备发现事件（兼容旧接口）
+   */
+  unsubscribeDeviceDiscovery(callback) {
+    this._deviceDiscoveryListeners =
+      this._deviceDiscoveryListeners.filter(l => l.callback !== callback);
+  },
+
+  /**
+   * 清除已发现的设备列表
+   */
+  clearDiscoveredDevices() {
+    this._discoveredScaleDevices = {};
   },
 
   onLaunch() {
@@ -110,8 +147,6 @@ App({
     this.globalData.dashboardCacheTime = 0;
     this.globalData.dashboardFetching = false;
     this.globalData.dashboardFetchPromise = null;
-    this.globalData.xiaomiConfigChecked = false;
-    this.globalData.hasXiaomiConfig = false;
     console.log('[App] 🧹 Dashboard 缓存已清除');
   },
 
@@ -199,57 +234,19 @@ App({
     }
     this.globalData.bluetoothInitializing = true;
 
-    // 使用缓存的配置检查结果
-    if (this.globalData.xiaomiConfigChecked) {
-      if (!this.globalData.hasXiaomiConfig) {
-        console.log('[BLE] ⚠️ 已检查过，未配置小米账号');
-        this.globalData.bluetoothInitializing = false;
-        return;
-      }
-      // 有配置但未初始化，继续执行
-      console.log('[BLE] ⚡ 使用缓存配置，直接初始化');
-    } else {
-      // 首次检查配置
-      try {
-        console.log('[BLE] 🔍 检查小米配置...');
+    console.log('[BLE] ✅ 开始初始化蓝牙');
 
-        // 使用统一的fetchDashboardData方法
-        const res = await this.fetchDashboardData(userId);
-
-        console.log('[BLE] 📦 接口返回:', res);
-
-
-        // 注意：res 没有 data 字段，直接访问 xiaomi_config
-        const hasXiaomiConfig = res.xiaomi_config === true;
-
-        // 缓存结果
-        this.globalData.xiaomiConfigChecked = true;
-        this.globalData.hasXiaomiConfig = hasXiaomiConfig;
-
-        if (!hasXiaomiConfig) {
-          console.log('[BLE] ❌ 未配置小米账号，跳过蓝牙初始化');
-          return;
-        }
-      } catch (err) {
-        console.error('[BLE] ❌ 配置检查失败:', err);
-        // 重置缓存标志，允许下次重试
-        this.globalData.xiaomiConfigChecked = false;
-        this.globalData.hasXiaomiConfig = false;
-        return;
-      }
-    }
-
-    // 初始化蓝牙
     try {
-      console.log('[BLE] ✅ 配置检查通过，开始初始化蓝牙');
-      this.initBluetoothManager();
+      // 等待蓝牙适配器初始化完成（Promise化）
+      await this.initBluetoothManager();
+      console.log('[BLE] ✅ 蓝牙适配器初始化成功');
 
       // 预加载成员数据
       this.loadScaleMembers(userId);
     } catch (err) {
       console.error('[BLE] ❌ 初始化蓝牙失败:', err);
+      throw err;  // 向上传播错误，让调用方处理
     } finally {
-      // 释放锁
       this.globalData.bluetoothInitializing = false;
     }
   },
@@ -260,40 +257,45 @@ App({
 
     if (this.globalData.bleAdapterInitialized) {
       console.log('[BLE] ✅ 蓝牙适配器已初始化，跳过');
-      return;
+      return Promise.resolve();
     }
 
-    wx.openBluetoothAdapter({
-      success: () => {
-        console.log('[BLE] ✅ 蓝牙适配器初始化成功');
-        this.globalData.bleAdapterInitialized = true;
-
-        // 监听设备发现
-        wx.onBluetoothDeviceFound(this.handleDeviceFound.bind(this));
-
-        // 监听适配器状态变化
-        wx.onBluetoothAdapterStateChange((res) => {
-          this.globalData.bleAdapterInitialized = res.available;
-          if (!res.available) {
-            console.warn('[BLE] ⚠️ 蓝牙适配器不可用');
-          }
-        });
-
-        // 开始持续扫描（不再周期性停止）
-        this.startContinuousScan();
-      },
-      fail: (err) => {
-        const errMsg = (err && err.errMsg) || '';
-        // already opened 视为成功（竞态条件导致）
-        if (errMsg.indexOf('already opened') !== -1) {
-          console.log('[BLE] ✅ 蓝牙适配器已就绪');
+    return new Promise((resolve, reject) => {
+      wx.openBluetoothAdapter({
+        success: () => {
+          console.log('[BLE] ✅ 蓝牙适配器初始化成功');
           this.globalData.bleAdapterInitialized = true;
+
+          // 监听设备发现
+          wx.onBluetoothDeviceFound(this.handleDeviceFound.bind(this));
+
+          // 监听适配器状态变化
+          wx.onBluetoothAdapterStateChange((res) => {
+            this.globalData.bleAdapterInitialized = res.available;
+            if (!res.available) {
+              console.warn('[BLE] ⚠️ 蓝牙适配器不可用');
+            }
+          });
+
+          // 开始持续扫描
           this.startContinuousScan();
-          return;
+          resolve();
+        },
+        fail: (err) => {
+          const errMsg = (err && err.errMsg) || '';
+          // already opened 视为成功（竞态条件导致）
+          if (errMsg.indexOf('already opened') !== -1) {
+            console.log('[BLE] ✅ 蓝牙适配器已就绪');
+            this.globalData.bleAdapterInitialized = true;
+            this.startContinuousScan();
+            resolve();
+            return;
+          }
+          console.error('[BLE] ❌ 蓝牙初始化失败:', err);
+          this.globalData.bleAdapterInitialized = false;
+          reject(err);
         }
-        console.error('[BLE] ❌ 蓝牙初始化失败:', err);
-        this.globalData.bleAdapterInitialized = false;
-      }
+      });
     });
   },
 
@@ -314,14 +316,26 @@ App({
 
   handleDeviceFound(res) {
     const devices = res.devices || [];
+    const now = Date.now();
+    let foundScaleForBinding = false;
+
     for (let device of devices) {
       if (!device.name) continue;
+
+      // ====== 绑定模式：记录发现的所有 BLE 设备（不限制名称）======
+      this._discoveredScaleDevices[device.deviceId] = {
+        deviceId: device.deviceId,
+        name: device.name,
+        RSSI: device.RSSI || -100,
+        lastSeen: now,
+      };
+      foundScaleForBinding = true;
 
       // 设备识别：小米体脂秤 2
       const deviceName = device.name.toLowerCase();
       if (!deviceName.includes('mibfs') && !deviceName.includes('mi scale')) continue;
 
-      // 解析数据
+      // 解析广播数据
       let finalData = null;
       if (device.serviceData) {
         for (let uuid in device.serviceData) {
@@ -410,10 +424,14 @@ App({
       const isOnline = device.RSSI >= -85 && device.RSSI <= -35;
       this.globalData.scaleConnectionStatus = isOnline ? 'online' : 'offline';
 
-      // 已在称重页则跳过跳转
+      // 绑定阶段 / 已在称重页，均跳过自动跳转
+      if (this.globalData.suppressScaleAutoNavigate) {
+        console.log('[BLE] \u23F8\uFE0F 绑定阶段，跳过自动跳转');
+        continue;
+      }
       if (this.isCurrentPage('pages/scale/scale')) {
         console.log('[BLE] \u23F8\uFE0F 已在称重页，跳过');
-        continue;  // 修复：使用 continue 而非 return，继续处理后续设备
+        continue;
       }
       
       // 只要数据新鲜且未处于跳转中，就跳转
@@ -422,6 +440,14 @@ App({
       } else {
         console.log('[BLE] \u23F8\uFE0F 跳转进行中，跳过');
       }
+    }
+
+    // 批量通知设备发现订阅者（每批次扫描结果统一通知一次）
+    if (foundScaleForBinding) {
+      const allDevices = Object.values(this._discoveredScaleDevices);
+      this._deviceDiscoveryListeners.forEach(l => {
+        try { l.callback(allDevices); } catch (e) { console.error('[Discovery] 通知失败:', e); }
+      });
     }
   },
 

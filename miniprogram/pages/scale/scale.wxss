@@ -1431,6 +1431,54 @@ transform: translateY(0) scale(1);
   letter-spacing: 0.5rpx;
 }
 
+/* 弹窗头部（标题+关闭按钮） */
+.modal-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 36rpx;
+}
+.modal-header-row .modal-title {
+  margin-bottom: 0;
+}
+.modal-close {
+  font-size: 32rpx;
+  color: #94A3B8;
+  padding: 8rpx;
+  line-height: 1;
+}
+
+/* 弹窗按钮行 */
+.modal-btn-row {
+  display: flex;
+  gap: 20rpx;
+  margin-top: 16rpx;
+}
+
+.modal-btn-row .submit-btn {
+  flex: 1;
+  margin-top: 0;
+}
+.cancel-btn {
+  flex: 1;
+  height: 88rpx;
+  font-size: 32rpx;
+  font-weight: 700;
+  color: #6B7280;
+  background: linear-gradient(135deg, #F3F4F6 0%, #E5E7EB 100%);
+  border-radius: 20rpx;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cancel-btn::after {
+  border: none;
+}
+.cancel-btn:active {
+  transform: scale(0.98);
+}
+
 .modal-form {
   padding: 40rpx 36rpx 32rpx;
 }

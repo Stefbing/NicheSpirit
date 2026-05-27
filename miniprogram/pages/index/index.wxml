@@ -225,6 +225,87 @@
     </view>
   </view>
 
+  <!--体脂秤权限说明弹窗-->
+  <view wx:if="{{showScalePermissionDialog}}" class="modal-mask" bindtap="closeScalePermissionDialog">
+    <view class="modal-box scale-permission-box" catchtap="stopPropagation">
+      <view class="scale-perm-icon">⚖️</view>
+      <view class="modal-title">绑定体脂秤</view>
+      <view class="scale-perm-desc">
+        <text>通过手机蓝牙连接体脂秤设备，每次上秤后自动记录体重、体脂率等健康数据，生成管理趋势图表。</text>
+      </view>
+      <view class="scale-perm-tips">
+        <view class="perm-tip-row">
+          <text class="tip-bullet">①</text>
+          <text class="tip-text">确保体脂秤已安装电池并处于开机状态</text>
+        </view>
+        <view class="perm-tip-row">
+          <text class="tip-bullet">②</text>
+          <text class="tip-text">将手机靠近体脂秤（建议 5 米以内）</text>
+        </view>
+        <view class="perm-tip-row">
+          <text class="tip-bullet">③</text>
+          <text class="tip-text">需要授权蓝牙权限用于扫描和连接设备</text>
+        </view>
+      </view>
+      <button class="submit-btn scale-bind-btn" bindtap="authorizeAndScan">开始绑定</button>
+      <button class="share-cancel-btn" bindtap="closeScalePermissionDialog">取消</button>
+    </view>
+  </view>
+
+  <!--体脂秤扫描弹窗-->
+  <view wx:if="{{showScaleScanningDialog}}" class="modal-mask" bindtap="closeScaleScanDialog">
+    <view class="modal-box scale-scan-box" catchtap="stopPropagation">
+      <view class="scan-header">
+        <view class="scan-icon {{scaleScanning ? 'scanning-anim' : ''}}">🔍</view>
+        <text class="modal-title">发现体脂秤</text>
+        <text class="scale-scan-hint">{{scaleScanHelp}}</text>
+      </view>
+
+      <!--设备列表-->
+      <scroll-view class="scale-device-list" scroll-y>
+        <view wx:if="{{scaleDiscoveredDevices.length === 0 && !scaleScanning}}" class="no-devices">
+          <text class="no-devices-icon">📡</text>
+          <text class="no-devices-text">未搜索到体脂秤设备</text>
+          <button class="retry-btn" bindtap="startScaleScan">重新搜索</button>
+        </view>
+
+        <view wx:for="{{scaleDiscoveredDevices}}" wx:key="deviceId" 
+              class="device-item {{item.isDuplicate ? 'device-duplicate' : ''}}"
+              bindtap="confirmBindScale"
+              data-device-id="{{item.deviceId}}"
+              data-device-name="{{item.name}}"
+              data-duplicate="{{item.isDuplicate}}">
+
+          <view class="device-item-left">
+            <view class="device-item-icon">⚖️</view>
+            <view class="device-item-info">
+              <text class="device-item-name">{{item.name}}</text>
+              <text class="device-item-meta">
+                {{item.isDuplicate ? '已绑定' : '信号强度：' + item.signalBars + '/4'}}
+              </text>
+            </view>
+          </view>
+
+          <view class="device-item-right">
+            <view wx:if="{{item.isDuplicate}}" class="duplicate-tag">已绑定</view>
+            <view wx:else class="signal-bars">
+              <view class="signal-bar {{item.signalBars >= 1 ? 'active' : ''}}"></view>
+              <view class="signal-bar {{item.signalBars >= 2 ? 'active' : ''}}"></view>
+              <view class="signal-bar {{item.signalBars >= 3 ? 'active' : ''}}"></view>
+              <view class="signal-bar {{item.signalBars >= 4 ? 'active' : ''}}"></view>
+            </view>
+          </view>
+        </view>
+      </scroll-view>
+
+      <view class="scan-footer">
+        <button class="share-cancel-btn" bindtap="closeScaleScanDialog">
+          {{scaleDiscoveredDevices.length > 0 ? '关闭' : '取消'}}
+        </button>
+      </view>
+    </view>
+  </view>
+
   <!-- 分享确认弹窗 -->
   <view wx:if="{{showShareConfirm}}" class="modal-mask" bindtap="closeShareConfirm">
     <view class="modal-box" catchtap="stopPropagation">
@@ -252,4 +333,5 @@
       </view>
     </view>
   </view>
+
 </view>

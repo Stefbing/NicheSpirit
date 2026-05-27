@@ -16,7 +16,7 @@ from sqlmodel import Session, select
 
 from .services.petkit_service import PetKitService
 from .services.cloudpets_service import cloudpets_service, FeedingPlan as CloudPetsPlan
-from .services.xiaomi_service import xiaomi_service
+
 from .models.models import User, WeightRecord, SystemConfig, FamilyMember
 from .models.db import get_session, init_db, engine
 from .utils.cache_manager import cache_manager
@@ -32,7 +32,6 @@ class AppState:
         self.petkit: Optional[PetKitService] = None
         self.cloudpets = None
         self.data_refresh_task = None
-        self.xiaomi_initialized: bool = False
 
 state = AppState()
 
@@ -102,6 +101,10 @@ async def lifespan(app: FastAPI):
     # 加载全局运行时配置到缓存（systemconfig → 内存，DB 缺失则回退环境变量）
     await _load_global_configs()
 
+    # 加载设备缓存（启动时全量加载，后续按需刷新）
+    from .utils.device_cache import device_cache
+    await device_cache.load_all()
+
     # 并行初始化所有服务（减少总启动时间）
     logger.info("Initializing services...")
     svc_start = time.time()
@@ -159,35 +162,30 @@ async def lifespan(app: FastAPI):
 
     # Add scheduled tasks
     async def refresh_dashboard_cache():
-        """后台定期刷新所有用户的仪表板缓存（无感刷新）"""
+        """后台定期刷新所有用户的仪表板缓存（无感刷新 + token 双写）"""
         try:
-            from .utils.config_manager import get_configs_batch
+            from .utils.device_cache import device_cache
             from sqlmodel import Session, select
             from .models.models import SystemConfig
-            from .models.db import engine  # 【修复】导入 engine
+            from .models.db import engine
 
             logger.info("Starting background dashboard cache refresh...")
             start_time = time.time()
 
-            # 获取所有有配置的用户ID（包括自有配置和共享设备）
+            # 获取所有有配置的用户ID
             loop = asyncio.get_running_loop()
 
             def _get_user_ids():
                 with Session(engine) as session:
-                    # 获取有自有平台的用户
                     own_stmt = select(SystemConfig.user_id).where(
-                        SystemConfig.platform.in_(["petkit", "cloudpets", "xiaomi"]),
+                        SystemConfig.platform.in_(["petkit", "cloudpets"]),
                         SystemConfig.key == "account",
                         SystemConfig.is_active == True
                     ).distinct()
                     own_ids = session.exec(own_stmt).all()
-
-                    # 【新增】获取有共享设备的用户
                     from .models.models import SharedDeviceConfig
                     shared_stmt = select(SharedDeviceConfig.to_user_id).distinct()
                     shared_ids = session.exec(shared_stmt).all()
-
-                    # 合并去重
                     all_ids = set(own_ids) | set(shared_ids)
                     return list(all_ids)
 
@@ -199,93 +197,68 @@ async def lifespan(app: FastAPI):
 
             logger.info(f"Refreshing cache for {len(user_ids)} users: {user_ids}")
 
-            # 并行刷新所有用户的缓存
             async def refresh_single_user(uid):
                 try:
-                    # 清除旧缓存
                     cache_prefix = f'user_{uid}'
                     await cache_manager.delete(f'{cache_prefix}_dashboard_combined_data')
 
-                    # 触发重新生成（调用dashboard接口逻辑）
-                    # 注意：这里不直接调用接口函数，而是执行相同的逻辑
-                    config_queries = [
-                        ("account", uid, "petkit"),
-                        ("password", uid, "petkit"),
-                        ("account", uid, "cloudpets"),
-                        ("password", uid, "cloudpets"),
-                        ("account", uid, "xiaomi"),  # 【修复】添加 xiaomi
-                        ("password", uid, "xiaomi"),  # 【修复】添加 xiaomi
-                    ]
-                    configs = await get_configs_batch(config_queries)
+                    # 从 DeviceCache 获取设备配置（避免重复查 DB）
+                    user_platforms = await device_cache.get_user_platforms(uid)
+                    pk_rec = user_platforms.get('petkit')
+                    cp_rec = user_platforms.get('cloudpets')
 
-                    petkit_username = configs.get(f"account_{uid}_petkit")
-                    petkit_password = configs.get(f"password_{uid}_petkit")
-                    cloudpets_account = configs.get(f"account_{uid}_cloudpets")
-                    cloudpets_password = configs.get(f"password_{uid}_cloudpets")
-                    xiaomi_account = configs.get(f"account_{uid}_xiaomi")
-                    xiaomi_password = configs.get(f"password_{uid}_xiaomi")
+                    has_petkit = pk_rec is not None and bool(pk_rec.account and pk_rec.password)
+                    has_cloudpets = cp_rec is not None and bool(cp_rec.account and cp_rec.password)
 
-                    # 只刷新有配置的平台
-                    has_petkit = bool(petkit_username and petkit_password)
-                    has_cloudpets = bool(cloudpets_account and cloudpets_password)
-                    has_xiaomi = bool(xiaomi_account and xiaomi_password)  # 【修复】添加 xiaomi 检查
-
-                    # 【新增】查询共享设备凭据，补充没有自有配置的平台
                     shared_creds = await _get_shared_platform_credentials(uid)
-                    if 'petkit' in shared_creds and not petkit_username:
-                        petkit_username = shared_creds['petkit']['account']
-                        petkit_password = shared_creds['petkit']['password']
+                    if 'petkit' in shared_creds and not has_petkit:
                         has_petkit = True
-                    if 'cloudpets' in shared_creds and not cloudpets_account:
-                        cloudpets_account = shared_creds['cloudpets']['account']
-                        cloudpets_password = shared_creds['cloudpets']['password']
+                    if 'cloudpets' in shared_creds and not has_cloudpets:
                         has_cloudpets = True
-                    if 'xiaomi' in shared_creds and not xiaomi_account:
-                        xiaomi_account = shared_creds['xiaomi']['account']
-                        xiaomi_password = shared_creds['xiaomi']['password']
-                        has_xiaomi = True
 
-                    if not has_petkit and not has_cloudpets and not has_xiaomi:  # 【修复】添加 xiaomi 判断
-                        # 如果没有自有的也没有共享的，但仍需写入一个空缓存（避免每次重新计算）
-                        dummy_data = {
-                            'petkit_devices': [],
-                            'litterbox_stats': {},
-                            'cloudpets_servings': {},
-                            'cloudpets_plans': [],
-                            'xiaomi_config': False,
-                            'scale_stats': {'today_count': 0, 'latest_body_fat': None},
-                            'has_shared_devices': False,
-                        }
-                        await cache_manager.set(f'{cache_prefix}_dashboard_combined_data', dummy_data, ttl=120)
+                    if not has_petkit and not has_cloudpets:
+                        await cache_manager.set(
+                            f'{cache_prefix}_dashboard_combined_data',
+                            {'petkit_devices': [], 'litterbox_stats': {},
+                             'cloudpets_servings': {}, 'cloudpets_plans': [],
+                             'has_shared_devices': False, 'device_platforms': list(user_platforms.values())},
+                            ttl=120
+                        )
                         return
 
-                    # 获取PetKit设备
-                    petkit_devices = []
-                    servings = {}
-                    plans = []
+                    petkit_devices, servings, plans = [], {}, []
+                    from .utils.config_manager import update_cloud_device_token
+
                     if has_petkit:
                         pk_service, pk_is_temp = await _get_petkit_for_user(uid)
                         if pk_service:
                             try:
                                 petkit_devices = await pk_service.get_devices()
+                                # 【双写】token 刷新后写回设备配置组
+                                mem_session = getattr(pk_service, '_memory_session', None)
+                                if mem_session and pk_rec:
+                                    import json as _json
+                                    token_str = _json.dumps(mem_session)
+                                    await update_cloud_device_token(uid, 'petkit', token_str, pk_rec.device_name)
                             finally:
                                 await _release_service(pk_service, pk_is_temp)
                         await cache_manager.set(f'{cache_prefix}_petkit_devices', petkit_devices, ttl=300)
 
-                    # 获取CloudPets数据
                     if has_cloudpets:
                         cp_service, cp_is_temp = await _get_cloudpets_for_user(uid)
                         if cp_service:
                             try:
                                 servings = await cp_service.get_servings_today() or {}
                                 plans = await cp_service.get_feeding_plans() or []
+                                # 【双写】token 刷新后写回设备配置组
+                                mem_token = getattr(cp_service, '_memory_token', None)
+                                if mem_token and cp_rec:
+                                    await update_cloud_device_token(uid, 'cloudpets', mem_token, cp_rec.device_name)
                             finally:
                                 await _release_service(cp_service, cp_is_temp)
-
                         await cache_manager.set(f'{cache_prefix}_cloudpets_servings', servings, ttl=120)
                         await cache_manager.set(f'{cache_prefix}_cloudpets_plans', plans, ttl=300)
 
-                    # 获取PetKit设备统计（复用已获取的服务实例）
                     if petkit_devices and has_petkit:
                         pk_service, pk_is_temp = await _get_petkit_for_user(uid)
                         if pk_service:
@@ -298,78 +271,55 @@ async def lifespan(app: FastAPI):
                             finally:
                                 await _release_service(pk_service, pk_is_temp)
 
-                    # 【优化】获取体脂秤统计数据（使用 COUNT + LIMIT 1，避免加载全部记录）
+                    # 体脂秤统计
                     scale_stats = {'today_count': 0, 'latest_body_fat': None}
-                    if has_xiaomi:
-                        try:
-                            from datetime import datetime, timedelta
-                            from .models.models import WeightRecord
-                            from sqlmodel import select
-                            from .models.db import engine
-                            from sqlalchemy import func
+                    try:
+                        from datetime import datetime, timedelta
+                        from .models.models import WeightRecord
+                        from .models.db import engine
+                        from sqlalchemy import func
 
-                            loop = asyncio.get_running_loop()
+                        def _query_scale_stats():
+                            with Session(engine) as db_session:
+                                today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+                                today_end = int(datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp() * 1000)
+                                count_stmt = select(func.count()).select_from(WeightRecord).where(
+                                    WeightRecord.user_id == uid,
+                                    WeightRecord.timestamp >= today_start,
+                                    WeightRecord.timestamp <= today_end
+                                )
+                                today_count = db_session.exec(count_stmt).one()
+                                latest_stmt = select(WeightRecord.body_fat).where(
+                                    WeightRecord.user_id == uid,
+                                    WeightRecord.timestamp >= today_start,
+                                    WeightRecord.timestamp <= today_end,
+                                    WeightRecord.body_fat.isnot(None)
+                                ).order_by(WeightRecord.timestamp.desc()).limit(1)
+                                latest_body_fat_raw = db_session.exec(latest_stmt).first()
+                                return {'today_count': today_count, 'latest_body_fat': round(latest_body_fat_raw, 1) if latest_body_fat_raw else None}
+                        scale_stats = await loop.run_in_executor(None, _query_scale_stats)
+                    except Exception as e:
+                        logger.error(f'[Refresh] 体脂秤统计失败: {e}')
 
-                            def _query_scale_stats():
-                                with Session(engine) as db_session:
-                                    today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-                                    today_end = int(datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp() * 1000)
+                    # 刷新 DeviceCache（token 已更新）
+                    await device_cache.invalidate_user(uid)
 
-                                    # 优化：使用 COUNT 统计而非加载全部记录
-                                    count_stmt = select(func.count()).select_from(WeightRecord).where(
-                                        WeightRecord.user_id == uid,
-                                        WeightRecord.timestamp >= today_start,
-                                        WeightRecord.timestamp <= today_end
-                                    )
-                                    today_count = db_session.exec(count_stmt).one()
-
-                                    # 优化：只查询最新 1 条记录的体脂率
-                                    latest_stmt = select(WeightRecord.body_fat).where(
-                                        WeightRecord.user_id == uid,
-                                        WeightRecord.timestamp >= today_start,
-                                        WeightRecord.timestamp <= today_end,
-                                        WeightRecord.body_fat.isnot(None)
-                                    ).order_by(WeightRecord.timestamp.desc()).limit(1)
-                                    latest_body_fat_raw = db_session.exec(latest_stmt).first()
-                                    latest_body_fat = round(latest_body_fat_raw, 1) if latest_body_fat_raw else None
-
-                                    return {
-                                        'today_count': today_count,
-                                        'latest_body_fat': latest_body_fat
-                                    }
-
-                            scale_stats = await loop.run_in_executor(None, _query_scale_stats)
-                            logger.info(f'[Background Refresh] User {uid} - 今日测量: {scale_stats["today_count"]}, 最新体脂: {scale_stats["latest_body_fat"]}')
-                        except Exception as e:
-                            logger.error(f'[Background Refresh] 获取体脂秤统计失败: {e}')
-
-                    # 构建组合缓存（使用显式变量，避免 locals() 脆弱引用）
-                    has_any_shared = any([
-                        'petkit' in (shared_creds or {}),
-                        'cloudpets' in (shared_creds or {}),
-                        'xiaomi' in (shared_creds or {}),
-                    ])
                     dashboard_data = {
                         'petkit_devices': petkit_devices,
                         'litterbox_stats': {},
                         'cloudpets_servings': servings,
                         'cloudpets_plans': plans,
-                        'xiaomi_config': bool(xiaomi_account and xiaomi_password),
                         'scale_stats': scale_stats,
-                        'has_shared_devices': has_any_shared,
+                        'has_shared_devices': any(p in (shared_creds or {}) for p in ['petkit', 'cloudpets']),
                     }
                     await cache_manager.set(f'{cache_prefix}_dashboard_combined_data', dashboard_data, ttl=120)
-
                     logger.info(f"✓ Cache refreshed for user {uid}")
                 except Exception as e:
                     logger.error(f"Failed to refresh cache for user {uid}: {e}")
 
-            # 并行刷新所有用户
             await asyncio.gather(*[refresh_single_user(uid) for uid in user_ids], return_exceptions=True)
-
             elapsed = time.time() - start_time
             logger.info(f"Dashboard cache refresh completed in {elapsed:.2f}s")
-
         except Exception as e:
             logger.error(f"Dashboard cache refresh failed: {e}")
 
@@ -640,25 +590,20 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
         if cached_data:
             return cached_data
 
-        # 批量获取所有配置（减少数据库查询次数）
-        config_queries = [
-            ("account", user_id, "petkit"),
-            ("password", user_id, "petkit"),
-            ("account", user_id, "cloudpets"),
-            ("password", user_id, "cloudpets"),
-            ("account", user_id, "xiaomi"),
-            ("password", user_id, "xiaomi"),
-        ]
-        configs = await get_configs_batch(config_queries)
+        # 从 DeviceCache 获取该用户的设备平台配置
+        from .utils.device_cache import device_cache
+        user_platforms = await device_cache.get_user_platforms(user_id)
 
-        petkit_username = configs.get(f"account_{user_id}_petkit")
-        petkit_password = configs.get(f"password_{user_id}_petkit")
-        cloudpets_account = configs.get(f"account_{user_id}_cloudpets")
-        cloudpets_password = configs.get(f"password_{user_id}_cloudpets")
-        xiaomi_account = configs.get(f"account_{user_id}_xiaomi")
-        xiaomi_password = configs.get(f"password_{user_id}_xiaomi")
+        petkit_rec = user_platforms.get('petkit')
+        cloudpets_rec = user_platforms.get('cloudpets')
+        xiaomi_rec = user_platforms.get('xiaomi')
 
-        # 【新增】查询该用户接受的共享设备，补充没有自有配置的平台
+        petkit_username = petkit_rec.account if petkit_rec and petkit_rec.is_complete else None
+        petkit_password = petkit_rec.password if petkit_rec and petkit_rec.is_complete else None
+        cloudpets_account = cloudpets_rec.account if cloudpets_rec and cloudpets_rec.is_complete else None
+        cloudpets_password = cloudpets_rec.password if cloudpets_rec and cloudpets_rec.is_complete else None
+
+        # 查询该用户接受的共享设备，补充没有自有配置的平台
         shared_creds = await _get_shared_platform_credentials(user_id)
         if 'petkit' in shared_creds and not petkit_username:
             petkit_username = shared_creds['petkit']['account']
@@ -668,19 +613,26 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
             cloudpets_account = shared_creds['cloudpets']['account']
             cloudpets_password = shared_creds['cloudpets']['password']
             logger.info(f"[Dashboard] 用户 {user_id} 使用共享的 CloudPets 凭证")
-        if 'xiaomi' in shared_creds and not xiaomi_account:
-            xiaomi_account = shared_creds['xiaomi']['account']
-            xiaomi_password = shared_creds['xiaomi']['password']
-            logger.info(f"[Dashboard] 用户 {user_id} 使用共享的 Xiaomi 凭证")
 
         dashboard_data = {}
 
-        # 【新增】记录是否有共享设备（供前端区分）
+        # 设备平台列表（供前端渲染设备卡片）
+        dashboard_data['device_platforms'] = [
+            {
+                'platform': p,
+                'device_name': r.device_name,
+                'device_key': r.device_key,
+                'is_ble': r.is_ble,
+                'is_complete': r.is_complete,
+            }
+            for p, r in user_platforms.items()
+        ]
+
         dashboard_data['has_shared_devices'] = len(shared_creds) > 0
 
         # 并行获取PetKit设备和CloudPets数据
         async def fetch_petkit_devices():
-            """获取PetKit设备列表"""
+            """获取PetKit设备列表（含 token 双写）"""
             petkit_devices = await cache_manager.get(f'{cache_prefix}_petkit_devices')
             if petkit_devices:
                 return petkit_devices
@@ -688,35 +640,52 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
             if not petkit_username or not petkit_password:
                 return []
 
-            # Try to initialize service for this user
             if state.petkit and getattr(state.petkit, 'user_id', None) == user_id:
-                devices = await state.petkit.get_devices()
+                pk_svc = state.petkit
+                devices = await pk_svc.get_devices()
+                # 【双写】token 刷新后写回设备配置组
+                mem_session = getattr(pk_svc, '_memory_session', None)
+                if mem_session and petkit_rec:
+                    from .utils.config_manager import update_cloud_device_token
+                    await update_cloud_device_token(user_id, 'petkit', json.dumps(mem_session), petkit_rec.device_name)
             else:
                 temp_service = PetKitService(petkit_username, petkit_password, user_id=user_id)
                 await temp_service.initialize()
                 devices = await temp_service.get_devices()
+                mem_session = getattr(temp_service, '_memory_session', None)
+                if mem_session and petkit_rec:
+                    from .utils.config_manager import update_cloud_device_token
+                    await update_cloud_device_token(user_id, 'petkit', json.dumps(mem_session), petkit_rec.device_name)
                 await temp_service.close()
 
             await cache_manager.set(f'{cache_prefix}_petkit_devices', devices, ttl=300)
             return devices
 
         async def fetch_cloudpets_data():
-            """获取CloudPets数据（servings + plans）"""
+            """获取CloudPets数据（servings + plans，含 token 双写）"""
             result = {"servings": {}, "plans": []}
 
             if not cloudpets_account or not cloudpets_password:
                 return result
 
-            # Initialize or use existing service
             if state.cloudpets and getattr(state.cloudpets, 'user_id', None) == user_id:
-                servings = await state.cloudpets.get_servings_today()
-                plans = await state.cloudpets.get_feeding_plans()
+                cp_svc = state.cloudpets
+                servings = await cp_svc.get_servings_today()
+                plans = await cp_svc.get_feeding_plans()
+                mem_token = getattr(cp_svc, '_memory_token', None)
+                if mem_token and cloudpets_rec:
+                    from .utils.config_manager import update_cloud_device_token
+                    await update_cloud_device_token(user_id, 'cloudpets', mem_token, cloudpets_rec.device_name)
             else:
                 import backend.app.services.cloudpets_service as cp_module
                 temp_service = cp_module.CloudPetsService(user_id=user_id)
                 await temp_service.initialize()
                 servings = await temp_service.get_servings_today()
                 plans = await temp_service.get_feeding_plans()
+                mem_token = getattr(temp_service, '_memory_token', None)
+                if mem_token and cloudpets_rec:
+                    from .utils.config_manager import update_cloud_device_token
+                    await update_cloud_device_token(user_id, 'cloudpets', mem_token, cloudpets_rec.device_name)
                 await temp_service.close()
 
             await cache_manager.set(f'{cache_prefix}_cloudpets_servings', servings, ttl=120)
@@ -744,48 +713,48 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
         dashboard_data['cloudpets_servings'] = cloudpets_data.get('servings', {})
         dashboard_data['cloudpets_plans'] = cloudpets_data.get('plans', [])
 
-        # Xiaomi scale config check
-        dashboard_data['xiaomi_config'] = bool(xiaomi_account and xiaomi_password)
+        # token 可能已更新，刷新 DeviceCache
+        from .utils.device_cache import device_cache as _dc
+        await _dc.invalidate_user(user_id)
 
-        # 【新增】获取体脂秤统计数据
-        if xiaomi_account and xiaomi_password:
-            try:
-                from datetime import datetime, timedelta
-                from .models.models import WeightRecord
-                from sqlmodel import select
+        # 体脂秤配置（来自缓存记录）
+        dashboard_data['xiaomi_config'] = xiaomi_rec is not None and xiaomi_rec.is_complete if xiaomi_rec else False
 
-                # 计算今天的开始和结束时间戳（毫秒）
-                today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-                today_end = int(datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp() * 1000)
+        # 获取体脂秤统计数据
+        try:
+            from datetime import datetime, timedelta
+            from .models.models import WeightRecord
+            from sqlmodel import select
 
-                # 查询今日测量次数
-                stmt_today_count = select(WeightRecord).where(
-                    WeightRecord.user_id == user_id,
-                    WeightRecord.timestamp >= today_start,
-                    WeightRecord.timestamp <= today_end
-                ).order_by(WeightRecord.timestamp.desc())
-                today_records = session.exec(stmt_today_count).all()
-                today_count = len(today_records)
+            # 计算今天的开始和结束时间戳（毫秒）
+            today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+            today_end = int(datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp() * 1000)
 
-                # 查询最新一次测量的体脂率
-                latest_body_fat = None
-                if today_records:
-                    # 按时间倒序，取第一条
-                    latest_record = today_records[0]
-                    if latest_record.body_fat:
-                        latest_body_fat = round(latest_record.body_fat, 1)
+            # 查询今日测量次数
+            stmt_today_count = select(WeightRecord).where(
+                WeightRecord.user_id == user_id,
+                WeightRecord.timestamp >= today_start,
+                WeightRecord.timestamp <= today_end
+            ).order_by(WeightRecord.timestamp.desc())
+            today_records = session.exec(stmt_today_count).all()
+            today_count = len(today_records)
 
-                scale_stats = {
-                    'today_count': today_count,
-                    'latest_body_fat': latest_body_fat
-                }
+            # 查询最新一次测量的体脂率
+            latest_body_fat = None
+            if today_records:
+                latest_record = today_records[0]
+                if latest_record.body_fat:
+                    latest_body_fat = round(latest_record.body_fat, 1)
 
-                logger.info(f'[Dashboard] 体脂秤统计 - 今日测量: {today_count}, 最新体脂: {latest_body_fat}')
-                dashboard_data['scale_stats'] = scale_stats
-            except Exception as e:
-                logger.error(f'[Dashboard] 获取体脂秤统计失败: {e}')
-                dashboard_data['scale_stats'] = {'today_count': 0, 'latest_body_fat': None}
-        else:
+            scale_stats = {
+                'today_count': today_count,
+                'latest_body_fat': latest_body_fat
+            }
+
+            logger.info(f'[Dashboard] 体脂秤统计 - 今日测量: {today_count}, 最新体脂: {latest_body_fat}')
+            dashboard_data['scale_stats'] = scale_stats
+        except Exception as e:
+            logger.error(f'[Dashboard] 获取体脂秤统计失败: {e}')
             dashboard_data['scale_stats'] = {'today_count': 0, 'latest_body_fat': None}
 
         await cache_manager.set(f'{cache_prefix}_dashboard_combined_data', dashboard_data, ttl=120)
@@ -1201,104 +1170,11 @@ def create_user(user: User, session: Session = Depends(get_session)):
     session.refresh(user)
     return user
 
-# --- Xiaomi Cloud APIs ---
-@app.get("/api/xiaomi/status")
-async def xiaomi_status(user_id: Optional[int] = None):
-    """Get Xiaomi service status for specific user"""
-    try:
-        if not user_id:
-            user_id = await _get_first_user_with_platform("xiaomi")
-            if not user_id:
-                return {"initialized": False}
 
-        from .utils.config_manager import get_config_from_db
-        username = await get_config_from_db("account", user_id=user_id, platform="xiaomi")
-        password = await get_config_from_db("password", user_id=user_id, platform="xiaomi")
 
-        has_credentials = bool(username and password)
-        return {
-            "initialized": has_credentials,
-            "user_id": user_id if has_credentials else None,
-            "has_token": has_credentials
-        }
-    except Exception as e:
-        logger.error(f"Failed to get Xiaomi status: {e}")
-        return {"initialized": False}
 
-@app.post("/api/xiaomi/login")
-async def xiaomi_login(user_id: Optional[int] = None):
-    """Login to Xiaomi Cloud for specific user"""
-    try:
-        if not user_id:
-            user_id = await _get_first_user_with_platform("xiaomi")
-            if not user_id:
-                raise HTTPException(status_code=503, detail="Xiaomi service not configured")
 
-        from .utils.config_manager import get_config_from_db
-        username = await get_config_from_db("account", user_id=user_id, platform="xiaomi")
-        password = await get_config_from_db("password", user_id=user_id, platform="xiaomi")
 
-        if not username or not password:
-            raise HTTPException(status_code=503, detail="Xiaomi credentials missing")
-
-        # Create temp service for this user
-        import backend.app.services.xiaomi_service as xm_module
-        temp_service = xm_module.XiaomiCloudService()
-        temp_service.username = username
-        temp_service.password = password
-
-        success = await temp_service.login()
-        if success:
-            return {"status": "success", "message": "Login successful"}
-        raise HTTPException(status_code=500, detail="Login failed")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Login error: {str(e)}")
-
-@app.post("/api/xiaomi/push-weight")
-async def push_weight_to_xiaomi(weight: float, body_fat: Optional[float] = None, bmi: Optional[float] = None,
-                                 muscle: Optional[float] = None, water: Optional[float] = None,
-                                 visceral_fat: Optional[float] = None, bone_mass: Optional[float] = None,
-                                 bmr: Optional[float] = None, impedance: Optional[int] = None, user_id: Optional[int] = None):
-    """Manually push weight data to Xiaomi Cloud for specific user"""
-    try:
-        if not user_id:
-            user_id = await _get_first_user_with_platform("xiaomi")
-            if not user_id:
-                raise HTTPException(status_code=503, detail="Xiaomi service not configured")
-
-        from .utils.config_manager import get_config_from_db
-        username = await get_config_from_db("account", user_id=user_id, platform="xiaomi")
-        password = await get_config_from_db("password", user_id=user_id, platform="xiaomi")
-
-        if not username or not password:
-            raise HTTPException(status_code=503, detail="Xiaomi credentials missing")
-
-        # Create temp service for this user
-        import backend.app.services.xiaomi_service as xm_module
-        temp_service = xm_module.XiaomiCloudService()
-        temp_service.username = username
-        temp_service.password = password
-
-        # Initialize (load token or login)
-        initialized = await temp_service.initialize()
-        if not initialized:
-            raise HTTPException(status_code=503, detail="Xiaomi login failed")
-
-        user_data = {"weight": weight, "impedance": impedance or 0, "user_id": user_id}
-        if body_fat is not None:
-            user_data.update({"body_fat": body_fat, "bmi": bmi, "muscle": muscle, "water": water,
-                              "visceral_fat": visceral_fat, "bone_mass": bone_mass, "bmr": bmr})
-
-        success = await temp_service.push_weight_data(user_data)
-        if success:
-            return {"status": "success", "message": "Data pushed to Xiaomi"}
-        raise HTTPException(status_code=500, detail="Failed to push data")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Push error: {str(e)}")
 
 @app.get("/api/scale/history/{user_id}")
 def get_weight_history(user_id: int, session: Session = Depends(get_session)):
@@ -1383,15 +1259,6 @@ async def record_weight(record: WeightRecord, session: Session = Depends(get_ses
     session.refresh(record)
     result = {"status": "success", "id": record.id}
 
-    # Check if user has Xiaomi configured and push data asynchronously
-    try:
-        from .utils.config_manager import get_config_from_db
-        xm_username = await get_config_from_db("account", user_id=record.user_id, platform="xiaomi")
-        xm_password = await get_config_from_db("password", user_id=record.user_id, platform="xiaomi")
-        if xm_username and xm_password:
-            _track_task(_safe_create_push_task(record, user if record.impedance else None))
-    except Exception as e:
-        logger.error(f"Failed to check Xiaomi config: {e}")
 
     return result
 
@@ -1694,6 +1561,8 @@ class BindLoginRequest(BaseModel):
     account: str       # 手机号
     password: str      # 明文密码
     code: str          # wx.login() 返回的临时 code
+    force_bind: bool = False  # 是否强制改绑（忽略冲突直接覆盖）
+    skip_bind: bool = False   # 是否跳过openid绑定（拒绝改绑时的登录，不更新User.openid）
 
 class BindLoginResponse(BaseModel):
     token: str
@@ -1702,6 +1571,7 @@ class BindLoginResponse(BaseModel):
     openid: str
     nickname: Optional[str] = None
     is_new_user: bool = False
+    openid_bound: bool = True  # 仅 skip_bind=True 时为 False，标识此登录未绑定openid
 
 @app.post("/api/auth/bind", response_model=BindLoginResponse)
 async def auth_bind_login(request: BindLoginRequest, session: Session = Depends(get_session)):
@@ -1759,31 +1629,58 @@ async def auth_bind_login(request: BindLoginRequest, session: Session = Depends(
     if not user.privacy_consent_at:
         user.privacy_consent_at = int(time.time() * 1000)
 
-    # --- 4. 建立 / 更新 OpenID 绑定（直接写 user 表）---
-    # 若此 openid 此前已绑定到其他用户，先清空旧绑定（一对一约束）
+    # --- 4. 设备绑定冲突检测 ---
+    # 此 openid 是否已绑定到其他用户？
     old_user = session.exec(
         select(User).where(User.openid == openid, User.id != user.id)
     ).first()
-    if old_user:
-        old_user.openid = None
-        old_user.unionid = None
-        old_user.session_key = None
-        old_user.updated_at = int(time.time() * 1000)
-        session.add(old_user)
-        logger.info(f"openid 换绑：旧用户 {old_user.id} 的绑定已清除")
+    has_conflict = old_user is not None
 
-    # 对当前用户落库 openid
-    user.openid = openid
-    user.session_key = new_session_key
-    if unionid:
-        user.unionid = unionid
+    if has_conflict and not request.force_bind and not request.skip_bind:
+        # 冲突且未指定策略 → 返回 409 让前端弹窗确认
+        masked_phone = old_user.phone_number
+        if masked_phone and len(masked_phone) >= 7:
+            masked_phone = masked_phone[:3] + '****' + masked_phone[-4:]
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "DEVICE_BOUND",
+                "message": "当前设备已绑定其他账号",
+                "bound_user": {
+                    "phone_masked": masked_phone,
+                    "nickname": old_user.nickname or '',
+                },
+            }
+        )
+
+    # --- 5. 建立 / 更新 OpenID 绑定 ---
+    if request.skip_bind:
+        # 用户拒绝改绑：正常登录但不更新 openid 绑定
+        logger.info(f"用户 {user.id} 跳过openid绑定，原有绑定关系保持不变")
+    else:
+        # 正常绑定 / 强制改绑
+        if has_conflict and request.force_bind:
+            # 清空旧用户的 openid（一对一约束）
+            old_user.openid = None
+            old_user.unionid = None
+            old_user.session_key = None
+            old_user.updated_at = int(time.time() * 1000)
+            session.add(old_user)
+            logger.info(f"openid 强制换绑：旧用户 {old_user.id} 的绑定已清除")
+
+        # 对当前用户落库 openid
+        user.openid = openid
+        user.session_key = new_session_key
+        if unionid:
+            user.unionid = unionid
+        logger.info(f"OpenID 绑定完成: user_id={user.id}, openid={openid[-8:]}...")
+
     user.updated_at = int(time.time() * 1000)
     session.add(user)
     session.commit()
     session.refresh(user)
-    logger.info(f"OpenID 绑定完成: user_id={user.id}, openid={openid[-8:]}...")
 
-    # --- 5. 签发会话 Token（替换JWT）---
+    # --- 6. 签发会话 Token（替换JWT）---
     raw_token, token_hash, expires_at = generate_session_token()
     user.token_hash = token_hash
     user.token_expires_at = expires_at
@@ -1798,6 +1695,7 @@ async def auth_bind_login(request: BindLoginRequest, session: Session = Depends(
         openid=openid,
         nickname=user.nickname,
         is_new_user=is_new_user,
+        openid_bound=not request.skip_bind,
     )
 
 
@@ -1914,7 +1812,7 @@ def get_config_value(key: str, session: Session = Depends(get_session)):
 def save_config(config_item: ConfigItem, session: Session = Depends(get_session)):
     """Save config item (auto-encrypt sensitive info)"""
     try:
-        sensitive_keys = ["ACCOUNT", "PASSWORD", "XIAOMI_ACCOUNT", "XIAOMI_PASSWORD"]
+        sensitive_keys = ["ACCOUNT", "PASSWORD"]
         should_encrypt = config_item.key in sensitive_keys or config_item.is_encrypted
         value_to_store = ConfigEncryptor.encrypt(config_item.value) if should_encrypt and config_item.value else config_item.value
         stmt = select(SystemConfig).where(
@@ -1959,55 +1857,16 @@ def delete_config(key: str, session: Session = Depends(get_session)):
         session.rollback()
         raise HTTPException(status_code=500, detail=f"删除配置失败: {str(e)}")
 
-async def push_to_xiaomi(record: WeightRecord, user: Optional[User] = None):
-    """Async push weight data to Xiaomi Cloud (user-specific)"""
-    try:
-        from .utils.config_manager import get_config_from_db
-        username = await get_config_from_db("account", user_id=record.user_id, platform="xiaomi")
-        password = await get_config_from_db("password", user_id=record.user_id, platform="xiaomi")
 
-        if not username or not password:
-            logger.warning(f"Xiaomi credentials not configured for user {record.user_id}")
-            return
-
-        # Create temp service for this user
-        import backend.app.services.xiaomi_service as xm_module
-        temp_service = xm_module.XiaomiCloudService()
-        temp_service.username = username
-        temp_service.password = password
-
-        initialized = await temp_service.initialize()
-        if not initialized:
-            logger.error(f"Xiaomi login failed for user {record.user_id}")
-            return
-
-        user_data = {"weight": record.weight, "impedance": record.impedance or 0, "user_id": record.user_id}
-        if record.body_fat:
-            user_data.update({"body_fat": record.body_fat, "bmi": record.bmi, "muscle": record.muscle,
-                              "water": record.water, "visceral_fat": record.visceral_fat,
-                              "bone_mass": record.bone_mass, "bmr": record.bmr})
-        elif user:
-            metrics = calculate_body_metrics(record.weight, record.impedance or 0, user)
-            user_data.update(metrics)
-
-        success = await temp_service.push_weight_data(user_data)
-        if success:
-            logger.info(f"Successfully pushed weight data to Xiaomi for user {record.user_id}")
-        else:
-            logger.error(f"Failed to push weight data to Xiaomi for user {record.user_id}")
-    except Exception as e:
-        logger.error(f"Error pushing to Xiaomi: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-
-async def _safe_create_push_task(record: WeightRecord, user: Optional[User] = None):
-    """Safely create background task with error handling"""
-    try:
-        await push_to_xiaomi(record, user)
-    except Exception as e:
-        logger.error(f"Background push task failed: {e}")
 # --- Device Management APIs ---
 from .utils.config_manager import get_user_devices, add_device as add_device_to_db, delete_device
+from .utils.config_manager import get_config_from_db, set_config_to_db as set_config_db
+
+
+class ScaleBindRequest(BaseModel):
+    device_id: str  # BLE MAC address, e.g. "XX:XX:XX:XX:XX:XX"
+    device_name: str  # BLE device name
+
 
 class AddDeviceRequest(BaseModel):
     device_type: str
@@ -2023,6 +1882,101 @@ class DeviceResponse(BaseModel):
     platform: str
     status: str
 
+class ScaleBindResponse(BaseModel):
+    device_key: str
+    device_id: str
+    device_name: str
+    status: str
+
+
+@app.post("/api/devices/scale/bind", response_model=ScaleBindResponse)
+async def bind_scale_device(request: ScaleBindRequest, user_id: str):
+    """Bind a BLE scale device to user account — no cloud credentials needed"""
+    try:
+        uid = int(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="无效的user_id")
+
+    ble_device_id = request.device_id.strip().lower()
+    ble_device_name = request.device_name.strip()
+
+    if not ble_device_id:
+        raise HTTPException(status_code=400, detail="设备ID不能为空")
+
+    try:
+        # Step 1: 防重复校验 — 查询该用户是否已绑定同一BLE设备
+        existing_id = await get_config_from_db(
+            key='ble_device_id', user_id=uid, platform='xiaomi'
+        )
+        if existing_id and existing_id == ble_device_id:
+            raise HTTPException(status_code=409, detail="无法重复添加同一蓝牙设备")
+
+        # Step 2: 校验是否已绑定了体脂秤（一个用户只能有一个）
+        from .utils.config_manager import get_user_devices
+        existing_devices = await get_user_devices(uid, platform='xiaomi')
+        if existing_devices:
+            raise HTTPException(status_code=409, detail="已绑定体脂秤，请先删除现有设备再重新绑定")
+
+        # Step 3: 存储体脂秤绑定信息 — 使用新存储规则：device_name=蓝牙名，仅存ble_address
+        from .utils.config_manager import add_ble_device
+        device_key = await add_ble_device(uid, ble_device_id, ble_device_name)
+
+        # Step 4: 清除仪表盘缓存 + 设备缓存
+        from .utils.device_cache import device_cache
+        await device_cache.invalidate_user(uid)
+        cache_prefix = f'user_{uid}'
+        for cache_key in [
+            f'{cache_prefix}_dashboard_combined_data',
+            f'{cache_prefix}_cloudpets_servings',
+            f'{cache_prefix}_cloudpets_plans',
+            f'{cache_prefix}_petkit_devices',
+        ]:
+            await cache_manager.delete(cache_key)
+
+        logger.info(f"体脂秤绑定成功: user={uid}, device={ble_device_id}, name={ble_device_name}")
+
+        return ScaleBindResponse(
+            device_key=f"xiaomi_{final_device_name}",
+            device_id=ble_device_id,
+            device_name=ble_device_name,
+            status="active",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"体脂秤绑定失败: {e}")
+        raise HTTPException(status_code=500, detail=f"体脂秤绑定失败: {str(e)}")
+
+
+@app.get("/api/devices/scale/bound")
+async def get_bound_scale_device(user_id: str):
+    """获取已绑定的体脂秤 BLE 设备信息"""
+    try:
+        uid = int(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="无效的user_id")
+
+    try:
+        ble_device_id = await get_config_from_db(
+            key='ble_device_id', user_id=uid, platform='xiaomi'
+        )
+        ble_device_name = await get_config_from_db(
+            key='ble_device_name', user_id=uid, platform='xiaomi'
+        )
+
+        if not ble_device_id:
+            return {"bound": False, "device_id": None, "device_name": None}
+
+        return {
+            "bound": True,
+            "device_id": ble_device_id,
+            "device_name": ble_device_name or "小米体脂秤",
+        }
+    except Exception as e:
+        logger.error(f"获取体脂秤绑定信息失败: {e}")
+        return {"bound": False, "device_id": None, "device_name": None}
+
+
 @app.post("/api/devices/add", response_model=DeviceResponse)
 async def add_device_api(request: AddDeviceRequest, user_id: str):
     """Add device to user account — 先验证凭据有效，再持久化到DB"""
@@ -2031,24 +1985,44 @@ async def add_device_api(request: AddDeviceRequest, user_id: str):
     except ValueError:
         raise HTTPException(status_code=400, detail="无效的user_id")
     try:
-        # Step 1: 先尝试验证凭据（不持久化），避免保存无效凭据
-        init_ok = await _init_service_for_user(
-            request.platform, uid, request.account, request.password
-        )
+        # Step 1: 验证凭据
+        token = ''
+        if request.device_type == "scale":
+            init_ok = True
+        else:
+            init_ok = await _init_service_for_user(
+                request.platform, uid, request.account, request.password
+            )
+            # Step 1.5: 登录成功后从内存中提取 token，回传给设备配置存储
+            if init_ok:
+                if request.platform == "petkit" and state.petkit is not None:
+                    mem_session = getattr(state.petkit, '_memory_session', None)
+                    if mem_session:
+                        token = json.dumps(mem_session)
+                elif request.platform == "cloudpets":
+                    cp = state.cloudpets
+                    if cp is not None:
+                        mem_token = getattr(cp, '_memory_token', None)
+                        if mem_token:
+                            token = mem_token
         if not init_ok:
             raise HTTPException(
                 status_code=400,
                 detail=f"{request.platform} 登录失败：账号或密码错误，请检查后重试",
             )
 
-        # Step 2: 凭据有效，持久化到 DB
-        device_key = await add_device_to_db(
+        # Step 2: 凭据有效，持久化到 DB（回传 token 确保设备配置组完整性）
+        from .utils.config_manager import add_cloud_device
+        device_key = await add_cloud_device(
             user_id=uid, platform=request.platform,
             account=request.account, password=request.password,
+            token=token,
             device_name=request.device_name,
         )
 
-        # Step 3: 清除仪表盘缓存
+        # Step 3: 清除设备缓存 + 仪表盘缓存
+        from .utils.device_cache import device_cache
+        await device_cache.invalidate_user(uid)
         cache_prefix = f'user_{uid}'
         for cache_key in [
             f'{cache_prefix}_dashboard_combined_data',
@@ -2079,11 +2053,43 @@ async def delete_device_api(device_key: str, user_id: str):
     except ValueError:
         raise HTTPException(status_code=400, detail="无效的user_id")
     try:
-        success = await delete_device(uid, device_key)
-        if not success:
-            raise HTTPException(status_code=404, detail="设备不存在")
+        # 使用新存储规则：按 platform 即可唯一定位
+        platform = device_key.split('_')[0] if '_' in device_key else device_key
 
-        # Clear all dashboard caches for this user
+        if platform == 'xiaomi':
+            # 体脂秤：软删除 BLE 配置 + 清除家庭成员
+            from .utils.config_manager import delete_device_by_platform
+            try:
+                await delete_device_by_platform(uid, 'xiaomi')
+            except Exception:
+                pass
+            try:
+                from sqlmodel import select
+                from .models.models import FamilyMember
+                from .models.db import engine
+                with Session(engine) as session:
+                    stmt = select(FamilyMember).where(
+                        FamilyMember.user_id == uid,
+                        FamilyMember.is_active == True
+                    )
+                    members = session.exec(stmt).all()
+                    for m in members:
+                        m.is_active = False
+                    session.commit()
+            except Exception:
+                pass
+        else:
+            from .utils.config_manager import delete_device_by_platform
+            success = await delete_device_by_platform(uid, platform)
+            if not success:
+                # 兼容旧 device_key 格式
+                success = await delete_device(uid, device_key)
+                if not success:
+                    raise HTTPException(status_code=404, detail="设备不存在")
+
+        # Clear all caches
+        from .utils.device_cache import device_cache
+        await device_cache.invalidate_user(uid)
         cache_prefix = f'user_{uid}'
         await cache_manager.delete(f'{cache_prefix}_dashboard_combined_data')
         await cache_manager.delete(f'{cache_prefix}_cloudpets_servings')
@@ -2110,9 +2116,6 @@ class SystemConfigResponse(BaseModel):
     cloudpets_password: Optional[str] = None
     petkit_account: Optional[str] = None
     petkit_password: Optional[str] = None
-    xiaomi_account: Optional[str] = None
-    xiaomi_password: Optional[str] = None
-
 @app.get("/api/system/config", response_model=SystemConfigResponse)
 async def get_system_config():
     """Get system configuration (passwords masked)"""
@@ -2120,8 +2123,6 @@ async def get_system_config():
         # Get first user ID for each platform
         cp_user = await _get_first_user_with_platform("cloudpets")
         pk_user = await _get_first_user_with_platform("petkit")
-        xm_user = await _get_first_user_with_platform("xiaomi")
-
         config = SystemConfigResponse()
 
         if cp_user:
@@ -2133,11 +2134,6 @@ async def get_system_config():
             config.petkit_account = await get_config_from_db("account", user_id=pk_user, platform="petkit")
             has_pwd = await get_config_from_db("password", user_id=pk_user, platform="petkit")
             config.petkit_password = "********" if has_pwd else None
-
-        if xm_user:
-            config.xiaomi_account = await get_config_from_db("account", user_id=xm_user, platform="xiaomi")
-            has_pwd = await get_config_from_db("password", user_id=xm_user, platform="xiaomi")
-            config.xiaomi_password = "********" if has_pwd else None
 
         return config
     except Exception as e:
@@ -2476,15 +2472,7 @@ async def create_scale_measurement(request: ScaleMeasurementRequest, session: Se
             logger.info(f"Created {meal_period} measurement for member {request.member_id}: {request.weight}kg")
             message = "保存成功"
 
-        # If user has Xiaomi configured, push data
-        try:
-            from .utils.config_manager import get_config_from_db
-            xm_username = await get_config_from_db("account", user_id=member.user_id, platform="xiaomi")
-            xm_password = await get_config_from_db("password", user_id=member.user_id, platform="xiaomi")
-            if xm_username and xm_password:
-                _track_task(_safe_create_push_task(record, member))
-        except Exception as e:
-            logger.error(f"Failed to check Xiaomi config: {e}")
+
 
         return {
             "code": 200,

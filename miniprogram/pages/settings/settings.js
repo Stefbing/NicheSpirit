@@ -63,6 +63,7 @@ Page({
         let maskedAccount = '';
 
         if (p.platform === 'xiaomi') {
+          // 体脂秤为本地设备，通过后端xiaomi_config判断是否已配置
           configured = dashboardData.xiaomi_config === true;
         } else if (p.platform === 'cloudpets') {
           const servings = dashboardData.cloudpets_servings;
