@@ -114,8 +114,6 @@ CREATE TABLE `weightrecord` (
     `bone_mass`       DECIMAL(5,2) DEFAULT NULL,
     `bmr`             DECIMAL(8,2) DEFAULT NULL,
     `timestamp`       BIGINT       NOT NULL COMMENT '测量时间(毫秒)',
-    `xiaomi_pushed`   TINYINT(1)   DEFAULT 0,
-    `xiaomi_push_time` BIGINT      DEFAULT NULL,
     `created_at`      BIGINT       NOT NULL,
 
     INDEX `idx_user_timestamp` (`user_id`, `timestamp` DESC),
