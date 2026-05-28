@@ -713,6 +713,31 @@
   line-height: 1.5;
 }
 
+.share-expiry-tip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8rpx;
+  margin: 16rpx 0 8rpx;
+}
+.share-expiry-tip .expiry-icon {
+  font-size: 28rpx;
+}
+.share-expiry-tip .expiry-text {
+  font-size: 26rpx;
+  color: #F59E0B;
+  font-weight: 500;
+}
+.share-expiry-hint {
+  text-align: center;
+  margin-bottom: 24rpx;
+}
+.share-expiry-hint .hint-link {
+  font-size: 24rpx;
+  color: #818CF8;
+  text-decoration: underline;
+}
+
 .share-btn-row {
   display: flex;
   flex-direction: column;

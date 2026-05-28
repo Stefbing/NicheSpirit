@@ -21,7 +21,6 @@
     </view>
 
     <view class="section-cards">
-      <!-- 修改密码 -->
       <view class="setting-card" bindtap="onChangePassword">
         <view class="card-left">
           <view class="icon-wrap" style="background: rgba(102, 126, 234, 0.15);">
@@ -35,7 +34,6 @@
         <text class="card-arrow">›</text>
       </view>
 
-      <!-- 查看隐私协议 -->
       <view class="setting-card" bindtap="onViewPrivacy">
         <view class="card-left">
           <view class="icon-wrap" style="background: rgba(118, 75, 162, 0.15);">
@@ -49,7 +47,6 @@
         <text class="card-arrow">›</text>
       </view>
 
-      <!-- 注销账号（红色警示） -->
       <view class="setting-card danger-card" bindtap="onDeleteAccount">
         <view class="card-left">
           <view class="icon-wrap" style="background: rgba(255, 77, 79, 0.15);">
@@ -79,8 +76,8 @@
             </view>
             <view class="card-body">
               <text class="card-title">{{item.label}}</text>
-              <text class="card-desc" wx:if="{{item.configured}}">已配置 - {{item.maskedAccount}}</text>
-              <text class="card-desc" wx:else>未配置，点击添加账号</text>
+              <text class="card-desc" wx:if="{{item.configured}}">已配置</text>
+              <text class="card-desc" wx:else>未配置</text>
             </view>
           </view>
           <text class="card-arrow">›</text>
@@ -88,7 +85,62 @@
       </block>
     </view>
 
-    <!-- ====== 功能区三：小程序用途简介区 ====== -->
+    <!-- ====== 功能区三：分享设备时效维护区 ====== -->
+    <view class="section-header" id="share-expiry-section">
+      <text class="section-icon">⏰</text>
+      <text class="section-title">分享设备时效维护</text>
+    </view>
+
+    <view class="section-cards">
+      <!-- 加载中 -->
+      <view wx:if="{{shareListLoading}}" class="share-loading">
+        <text class="loading-text">加载中...</text>
+      </view>
+
+      <!-- 无分享记录 -->
+      <view wx:elif="{{shareList.length === 0}}" class="share-empty">
+        <text class="empty-icon">📤</text>
+        <text class="empty-text">暂无分享记录</text>
+        <text class="empty-hint">在首页点击 ↗ 按钮分享设备给好友后，可在此管理时效</text>
+      </view>
+
+      <!-- 分享列表 -->
+      <block wx:else>
+        <view wx:for="{{shareList}}" wx:key="id" class="share-card">
+          <view class="share-card-header">
+            <view class="share-user-info">
+              <text class="share-user-icon">👤</text>
+              <text class="share-user-name">{{item.to_user_nickname}}</text>
+            </view>
+            <view class="share-status {{item.statusClass}}">{{item.statusText}}</view>
+          </view>
+
+          <view class="share-card-body">
+            <view class="share-info-row">
+              <text class="info-label">分享设备</text>
+              <text class="info-value">{{item.deviceNames}}</text>
+            </view>
+            <view class="share-info-row">
+              <text class="info-label">分享时间</text>
+              <text class="info-value">{{item.createdTime}}</text>
+            </view>
+            <view class="share-info-row" wx:if="{{item.status === 'accepted' || item.status === 'pending'}}">
+              <text class="info-label">剩余时效</text>
+              <text class="info-value info-value-time">{{item.remainingText}}</text>
+            </view>
+          </view>
+
+          <view class="share-card-actions">
+            <button wx:if="{{item.status === 'accepted'}}" class="action-btn edit-btn"
+                    bindtap="onEditExpiry" data-share-id="{{item.id}}">修改时效</button>
+            <button wx:if="{{item.status === 'accepted' || item.status === 'pending'}}" class="action-btn revoke-btn"
+                    bindtap="onRevokeShare" data-share-id="{{item.id}}">撤销分享</button>
+          </view>
+        </view>
+      </block>
+    </view>
+
+    <!-- ====== 功能区四：小程序用途简介区 ====== -->
     <view class="section-header">
       <text class="section-icon">ℹ️</text>
       <text class="section-title">小程序用途简介区</text>
@@ -121,4 +173,25 @@
       </view>
     </view>
   </view>
+
+  <!-- 修改时效弹窗 -->
+  <view wx:if="{{showExpiryModal}}" class="modal-mask" bindtap="closeExpiryModal">
+    <view class="modal-box" catchtap="stopPropagation">
+      <view class="modal-title">修改分享时效</view>
+      <view class="modal-desc">设置"{{editShareName}}"的设备可用时长</view>
+
+      <view class="form-group">
+        <text class="form-label">有效时长（小时）</text>
+        <input class="form-input" type="number" placeholder="请输入 1~720"
+               value="{{editExpiryInput}}" bindinput="onExpiryInput" />
+        <text class="form-hint">设置范围：1 小时 ~ 720 小时（30 天）</text>
+      </view>
+
+      <view class="share-btn-row">
+        <button class="submit-btn" bindtap="confirmUpdateExpiry">确认更新</button>
+        <button class="share-cancel-btn" bindtap="closeExpiryModal">取消</button>
+      </view>
+    </view>
+  </view>
+
 </view>

@@ -139,7 +139,8 @@ class CloudPetsService:
         return account
 
     async def _load_token_from_db(self) -> bool:
-        """Try to load the latest token from database（二级缓存：内存 → DB）"""
+        """Try to load the latest token from database（二级缓存：内存 → DB）
+        使用标准化 key='token' + platform='cloudpets'"""
         try:
             # ---- 1. 检查内存缓存 ----
             if self._memory_token:
@@ -149,11 +150,12 @@ class CloudPetsService:
 
             # ---- 2. 从DB加载 ----
             loop = asyncio.get_event_loop()
-            
+
             def _load_token():
                 with Session(engine) as session:
                     statement = select(SystemConfig).where(
-                        SystemConfig.key == "cloudpets_token",
+                        SystemConfig.key == "token",
+                        SystemConfig.platform == "cloudpets",
                         SystemConfig.user_id == (self.user_id or 0),
                         SystemConfig.is_active == True
                     ).order_by(SystemConfig.id.desc())
@@ -161,7 +163,7 @@ class CloudPetsService:
                     if config:
                         return config.value
                 return None
-            
+
             token = await loop.run_in_executor(None, _load_token)
             if token:
                 self.client.headers["authorization"] = token
@@ -173,33 +175,43 @@ class CloudPetsService:
         return False
 
     async def _save_token_to_db(self, token: str):
-        """Save new token to database"""
+        """Save new token to database
+        使用标准化 key='token' + platform='cloudpets'"""
         try:
             loop = asyncio.get_event_loop()
-            
+
             def _save_token():
                 with Session(engine) as session:
+                    # 查标准化 key='token' + platform='cloudpets'
                     statement = select(SystemConfig).where(
-                        SystemConfig.key == "cloudpets_token",
+                        SystemConfig.key == "token",
+                        SystemConfig.platform == "cloudpets",
+                        SystemConfig.device_name == "cloudpets",
                         SystemConfig.user_id == (self.user_id or 0),
-                        SystemConfig.is_active == True  # 只查询未删除的配置
+                        SystemConfig.is_active == True
                     )
                     config = session.exec(statement).first()
-                    
+
                     if not config:
                         config = SystemConfig(
                             user_id=self.user_id or 0,
-                            key="cloudpets_token",
+                            key="token",
+                            platform="cloudpets",
+                            device_name="cloudpets",
                             value=token,
-                            is_active=True
+                            is_encrypted=False,
+                            is_active=True,
+                            updated_at=int(time.time() * 1000),
                         )
                         session.add(config)
                     else:
                         config.value = token
                         config.updated_at = int(time.time() * 1000)
+                        config.is_encrypted = False
                         session.add(config)
+
                     session.commit()
-            
+
             await loop.run_in_executor(None, _save_token)
             self._memory_token = token  # 同步更新内存缓存
             logger.info("Saved new CloudPets token to database + memory cache")

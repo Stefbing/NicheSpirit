@@ -314,6 +314,13 @@
         <text wx:if="{{userDevices.length > 0}}">分享将使对方自动获取并使用您的全部设备</text>
         <text wx:else>当前暂无设备可分享</text>
       </view>
+      <view class="share-expiry-tip">
+        <text class="expiry-icon">⏰</text>
+        <text class="expiry-text">默认有效期为 24 小时</text>
+      </view>
+      <view class="share-expiry-hint" bindtap="goToExpirySettings">
+        <text class="hint-link">前往设置中心修改时效 →</text>
+      </view>
       <view class="share-btn-row">
         <button class="share-submit-btn" open-type="share" wx:if="{{userDevices.length > 0}}"
                 bindtap="doShare">确认分享</button>

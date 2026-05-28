@@ -219,6 +219,7 @@ Page({
             online: false,
             today_measurements: 0,
             latest_body_fat: null,
+            is_shared: plat.is_shared || false,
           }
 
           const scaleStats = dashboardData.scale_stats
@@ -241,6 +242,7 @@ Page({
             status: 'active',
             today_servings: 0,
             remaining_plans: 0,
+            is_shared: plat.is_shared || false,
           }
 
           const servingsData = dashboardData.cloudpets_servings
@@ -280,6 +282,7 @@ Page({
             status: 'active',
             today_visits: 0,
             sand_level: 0,
+            is_shared: plat.is_shared || false,
           }
 
           const litterboxStats = dashboardData.litterbox_stats || {}
@@ -683,6 +686,14 @@ Page({
     const deviceKey = e.currentTarget.dataset.deviceKey
     const deviceName = e.currentTarget.dataset.deviceName
     
+    // 检查是否共享设备（被分享者无权删除）
+    const sharedDevices = this.data.userDevices.filter(d => d.is_shared)
+    const isShared = sharedDevices.some(d => d.device_key === deviceKey)
+    if (isShared) {
+      wx.showToast({ title: '共享设备不支持删除', icon: 'none' })
+      return
+    }
+    
     wx.showModal({
       title: '删除设备',
       content: `确定要删除"${deviceName}"吗？\n删除后需要重新配置账号密码。`,
@@ -915,6 +926,14 @@ Page({
 
   closeAcceptShare() {
     this.setData({ showAcceptShare: false })
+  },
+
+  // 跳转到设置中心 → 分享时效管理
+  goToExpirySettings() {
+    this.setData({ showShareConfirm: false })
+    wx.navigateTo({
+      url: '/pages/settings/settings#share-expiry-section',
+    })
   },
 
   /**

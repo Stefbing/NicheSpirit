@@ -16,11 +16,21 @@ Page({
     userId: null,
     nickname: '',
     deviceList: [],
+    // 分享管理
+    shareList: [],
+    shareListLoading: false,
+    // 修改时效弹窗
+    showExpiryModal: false,
+    editShareId: null,
+    editShareName: '',
+    editExpiryHours: 24,
+    editExpiryInput: '24',
   },
 
   onShow() {
     this.loadUserInfo();
     this.loadDeviceConfigStatus();
+    this.loadShareManagement();
   },
 
   /**
@@ -54,7 +64,6 @@ Page({
     ];
 
     try {
-      // 获取 dashboard 数据判断各平台配置情况
       const app = getApp();
       const dashboardData = await app.fetchDashboardData(userId);
 
@@ -63,7 +72,6 @@ Page({
         let maskedAccount = '';
 
         if (p.platform === 'xiaomi') {
-          // 体脂秤为本地设备，通过后端xiaomi_config判断是否已配置
           configured = dashboardData.xiaomi_config === true;
         } else if (p.platform === 'cloudpets') {
           const servings = dashboardData.cloudpets_servings;
@@ -79,18 +87,198 @@ Page({
       this.setData({ deviceList });
     } catch (err) {
       console.error('[Settings] 加载设备配置状态失败:', err);
-      // 默认全为未配置
       this.setData({
         deviceList: platforms.map(p => ({ ...p, configured: false, maskedAccount: '' })),
       });
     }
   },
 
-  // ====== 功能区一事件 ======
+  // ====== 分享时效管理 ======
 
   /**
-   * 修改密码
+   * 加载分享管理列表
    */
+  async loadShareManagement() {
+    const userId = this.data.userId;
+    if (!userId) return;
+
+    this.setData({ shareListLoading: true });
+    try {
+      const res = await cloudRequest.callContainer({
+        path: `/api/share/manage-list?user_id=${userId}`,
+        method: 'GET',
+      });
+
+      const shares = (res && res.shares) || [];
+      // 格式化显示
+      const shareList = shares.map(s => {
+        let statusText = '';
+        let statusClass = '';
+        let remainingText = '';
+
+        if (s.status === 'pending') {
+          statusText = '待接受';
+          statusClass = 'status-pending';
+          remainingText = `剩余 ${s.remaining_hours}h`;
+        } else if (s.status === 'accepted') {
+          statusText = '使用中';
+          statusClass = 'status-active';
+          if (s.remaining_hours > 0) {
+            remainingText = `剩余 ${s.remaining_hours}h`;
+          } else {
+            remainingText = '即将过期';
+          }
+        } else {
+          statusText = '已撤销';
+          statusClass = 'status-revoked';
+          remainingText = '已失效';
+        }
+
+        const deviceNames = (s.device_keys || []).map(k => {
+          const parts = k.split('_');
+          const plat = parts[0];
+          const platMap = { petkit: '小佩猫厕所', cloudpets: '喂食机', xiaomi: '体脂秤' };
+          return platMap[plat] || plat;
+        }).join('、');
+
+        return {
+          ...s,
+          statusText,
+          statusClass,
+          remainingText,
+          deviceNames,
+          createdTime: this._formatTime(s.created_at),
+        };
+      });
+
+      this.setData({ shareList, shareListLoading: false });
+    } catch (err) {
+      console.error('[Settings] 加载分享列表失败:', err);
+      this.setData({ shareListLoading: false });
+    }
+  },
+
+  _formatTime(ms) {
+    if (!ms) return '';
+    const d = new Date(ms);
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  },
+
+  /**
+   * 打开修改时效弹窗
+   */
+  onEditExpiry(e) {
+    const shareId = e.currentTarget.dataset.shareId;
+    const share = this.data.shareList.find(s => s.id === shareId);
+    if (!share) return;
+
+    this.setData({
+      showExpiryModal: true,
+      editShareId: shareId,
+      editShareName: share.to_user_nickname || '好友',
+      editExpiryHours: Math.max(1, Math.ceil(share.remaining_hours || 24)),
+      editExpiryInput: String(Math.max(1, Math.ceil(share.remaining_hours || 24))),
+    });
+  },
+
+  closeExpiryModal() {
+    this.setData({ showExpiryModal: false });
+  },
+
+  onExpiryInput(e) {
+    this.setData({ editExpiryInput: e.detail.value });
+  },
+
+  /**
+   * 确认修改时效
+   */
+  async confirmUpdateExpiry() {
+    const hours = parseInt(this.data.editExpiryInput, 10);
+    if (isNaN(hours) || hours < 1) {
+      wx.showToast({ title: '有效时长至少 1 小时', icon: 'none' });
+      return;
+    }
+    if (hours > 720) {
+      wx.showToast({ title: '有效时长最多 720 小时（30天）', icon: 'none' });
+      return;
+    }
+
+    wx.showLoading({ title: '更新中…', mask: true });
+    try {
+      const userInfo = wx.getStorageSync('userInfo');
+      const token = wx.getStorageSync('token');
+      const res = await cloudRequest.callContainer({
+        path: '/api/share/update-expiry',
+        method: 'POST',
+        data: {
+          share_id: this.data.editShareId,
+          user_id: userInfo.user_id,
+          expire_hours: hours,
+        },
+        header: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+
+      wx.hideLoading();
+      this.closeExpiryModal();
+
+      if (res && res.success) {
+        wx.showToast({ title: res.message || '时效已更新', icon: 'success', duration: 2000 });
+        this.loadShareManagement();
+      } else {
+        wx.showToast({ title: res?.message || '更新失败', icon: 'none' });
+      }
+    } catch (err) {
+      wx.hideLoading();
+      this.closeExpiryModal();
+      const msg = err?.data?.detail || err?.errMsg || '更新失败';
+      wx.showToast({ title: msg, icon: 'none' });
+    }
+  },
+
+  /**
+   * 撤销分享
+   */
+  onRevokeShare(e) {
+    const shareId = e.currentTarget.dataset.shareId;
+    const share = this.data.shareList.find(s => s.id === shareId);
+    const name = share ? (share.to_user_nickname || '好友') : '该好友';
+
+    wx.showModal({
+      title: '撤销分享',
+      content: `确定撤销对"${name}"的设备分享吗？撤销后对方将无法继续使用共享设备。`,
+      confirmText: '确认撤销',
+      confirmColor: '#ff4d4f',
+      cancelText: '取消',
+      success: async (res) => {
+        if (res.confirm) {
+          await this.doRevokeShare(shareId);
+        }
+      },
+    });
+  },
+
+  async doRevokeShare(shareId) {
+    wx.showLoading({ title: '撤销中…', mask: true });
+    try {
+      const userInfo = wx.getStorageSync('userInfo');
+      const token = wx.getStorageSync('token');
+      await cloudRequest.callContainer({
+        path: `/api/share/revoke?share_id=${shareId}&user_id=${userInfo.user_id}`,
+        method: 'POST',
+        header: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      wx.hideLoading();
+      wx.showToast({ title: '已撤销', icon: 'success', duration: 1500 });
+      this.loadShareManagement();
+    } catch (err) {
+      wx.hideLoading();
+      wx.showToast({ title: '撤销失败', icon: 'none' });
+    }
+  },
+
+  // ====== 功能区一事件 ======
+
   onChangePassword() {
     wx.showModal({
       title: '修改密码',
@@ -131,16 +319,10 @@ Page({
     }
   },
 
-  /**
-   * 查看隐私协议
-   */
   onViewPrivacy() {
     wx.navigateTo({ url: '/pages/privacy/privacy' });
   },
 
-  /**
-   * 注销账号
-   */
   onDeleteAccount() {
     wx.showModal({
       title: '⚠️ 危险操作',
@@ -150,7 +332,6 @@ Page({
       cancelText: '取消',
       success: (res) => {
         if (res.confirm) {
-          // 二次确认
           wx.showModal({
             title: '再次确认',
             content: '请再次确认：您确定要注销账号并删除所有数据吗？',
@@ -180,7 +361,6 @@ Page({
         header: token ? { Authorization: `Bearer ${token}` } : {},
       });
 
-      // 清除本地存储
       wx.removeStorageSync('userInfo');
       wx.removeStorageSync('token');
       wx.removeStorageSync('preventSilentLogin');
@@ -200,9 +380,6 @@ Page({
 
   // ====== 功能区二事件 ======
 
-  /**
-   * 点击编辑设备配置（已废弃 - 配置管理移至首页设备列表）
-   */
   onEditDeviceConfig() {
     wx.showToast({ title: '请在首页管理设备配置', icon: 'none' });
   },

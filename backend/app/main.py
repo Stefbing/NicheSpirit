@@ -162,6 +162,35 @@ async def lifespan(app: FastAPI):
     # Init AppState
     state.data_refresh_task = None
 
+    # 启动时清理脏数据：user_id!=0 且 key 不在允许集合中的记录
+    try:
+        from .models.models import SystemConfig
+        from sqlmodel import Session, select
+        from .models.db import engine
+
+        VALID_USER_KEYS = {'account', 'password', 'token', 'ble_address'}
+        def _cleanup():
+            with Session(engine) as session:
+                dirty = session.exec(
+                    select(SystemConfig).where(
+                        SystemConfig.user_id != 0,
+                        SystemConfig.is_active == True,
+                        SystemConfig.key.notin_(VALID_USER_KEYS),
+                    )
+                ).all()
+                for rec in dirty:
+                    rec.is_active = False
+                    session.add(rec)
+                if dirty:
+                    session.commit()
+                    logger.info(f"🧹 清理了 {len(dirty)} 条脏数据记录 (user_id!=0, key不在允许集合)")
+                else:
+                    logger.debug("无脏数据需要清理")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _cleanup)
+    except Exception as e:
+        logger.warning(f"启动时清理脏数据失败（非致命）: {e}")
+
     # Add scheduled tasks
     async def refresh_dashboard_cache():
         """后台定期刷新所有用户的仪表板缓存（无感刷新 + token 双写）"""
@@ -311,7 +340,7 @@ async def lifespan(app: FastAPI):
                     # 构建设备平台列表（自有设备）
                     device_platforms = [
                         {'platform': p, 'device_name': r.device_name, 'device_key': r.device_key,
-                         'is_ble': r.is_ble, 'is_complete': r.is_complete}
+                         'is_ble': r.is_ble, 'is_complete': r.is_complete, 'is_shared': False}
                         for p, r in user_platforms.items()
                     ]
                     # 【修复】补充共享设备平台（SharedDeviceConfig 不在 DeviceCache 中）
@@ -324,6 +353,7 @@ async def lifespan(app: FastAPI):
                                 'device_key': f'{plat_name}_shared',
                                 'is_ble': False,
                                 'is_complete': True,
+                                'is_shared': True,
                             })
                     dashboard_data = {
                         'petkit_devices': petkit_devices,
@@ -350,6 +380,44 @@ async def lifespan(app: FastAPI):
 
     # 每90秒刷新一次缓存（比缓存过期时间60s长，确保在过期前刷新）
     await scheduler.add_task('dashboard_cache_refresh', refresh_dashboard_cache, interval=90, immediate=False)
+
+    # 后台定期清理过期分享（每5分钟执行一次）
+    async def cleanup_expired_shares():
+        """自动撤销所有已过期的分享"""
+        try:
+            from .models.models import DeviceShare
+            from .models.db import engine
+            from sqlmodel import Session, select
+            loop = asyncio.get_running_loop()
+            def _cleanup():
+                with Session(engine) as s:
+                    now_ms = int(time.time() * 1000)
+                    expired = s.exec(
+                        select(DeviceShare).where(
+                            DeviceShare.status.in_(["accepted", "pending"]),
+                            DeviceShare.expires_at <= now_ms,
+                        )
+                    ).all()
+                    if not expired:
+                        return 0, []
+                    to_users = set()
+                    for share in expired:
+                        share.status = "revoked"
+                        s.add(share)
+                        if share.to_user_id:
+                            to_users.add(share.to_user_id)
+                    s.commit()
+                    return len(expired), list(to_users)
+            count, to_users = await loop.run_in_executor(None, _cleanup)
+            if count:
+                logger.info(f"⏰ 后台清理了 {count} 个过期分享")
+                from .utils.device_cache import device_cache
+                for uid in to_users:
+                    await device_cache.invalidate_user(uid)
+        except Exception as e:
+            logger.error(f"Expired share cleanup failed: {e}")
+
+    await scheduler.add_task('expired_share_cleanup', cleanup_expired_shares, interval=300, immediate=True)
     await scheduler.start()
 
     # CacheManager 为惰性过期，无需后台清理
@@ -548,6 +616,16 @@ async def _get_shared_platform_credentials(user_id: int) -> dict:
                     if not share_record:
                         continue
 
+                    # 【时效检查】如果分享已过期，跳过并不再返回凭据
+                    now_ms = int(time.time() * 1000)
+                    if share_record.status != "accepted" or now_ms > share_record.expires_at:
+                        # 自动标记为已过期
+                        if share_record.status == "accepted":
+                            share_record.status = "revoked"
+                            session.add(share_record)
+                            session.commit()
+                        continue
+
                     # 读取分享者的原始凭据（解密）
                     from_user_id = share_record.from_user_id
                     config_rows = session.exec(
@@ -632,6 +710,7 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
                 'device_key': r.device_key,
                 'is_ble': r.is_ble,
                 'is_complete': r.is_complete,
+                'is_shared': False,
             }
             for p, r in user_platforms.items()
         ]
@@ -646,6 +725,7 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
                     'device_key': f'{platform_name}_shared',
                     'is_ble': False,
                     'is_complete': True,
+                    'is_shared': True,
                 })
 
         dashboard_data['has_shared_devices'] = len(shared_creds) > 0
@@ -1787,6 +1867,20 @@ async def delete_device_api(device_key: str, user_id: str):
     except ValueError:
         raise HTTPException(status_code=400, detail="无效的user_id")
     try:
+        # 检查是否为共享设备（被分享者无权删除）
+        from .models.models import SharedDeviceConfig
+        from .models.db import engine
+        from sqlmodel import select
+        with Session(engine) as _s:
+            shared = _s.exec(
+                select(SharedDeviceConfig).where(
+                    SharedDeviceConfig.to_user_id == uid,
+                    SharedDeviceConfig.device_key == device_key,
+                )
+            ).first()
+            if shared:
+                raise HTTPException(status_code=403, detail="共享设备不支持删除操作，请联系分享者处理")
+
         # 使用新存储规则：按 platform 即可唯一定位
         platform = device_key.split('_')[0] if '_' in device_key else device_key
 

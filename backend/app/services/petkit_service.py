@@ -22,7 +22,6 @@ SESSION_EXPIRY_MS = 30 * 60 * 1000  # 30分钟
 SESSION_REFRESH_THRESHOLD_MIN = 25  # 25分钟
 DEVICE_CACHE_TTL = 30  # 设备数据缓存30秒
 SUPPORTED_DEVICE_TYPES = {'T3', 'T4', 'T5'}
-TOKEN_KEY = "petkit_session_data"
 
 # 预编译正则表达式
 RAW_STATE_PATTERN = re.compile(r'(\w+)=([\w\d\.\-]+)')
@@ -103,7 +102,8 @@ class PetKitService:
             return True
 
     async def _load_session_from_db(self) -> bool:
-        """Try to load the latest session data from database（二级缓存：内存 → DB）"""
+        """Try to load the latest session data from database（二级缓存：内存 → DB）
+        使用标准化 key='token' + platform='petkit'"""
         try:
             # ---- 1. 检查内存缓存 ----
             if self._memory_session:
@@ -119,11 +119,12 @@ class PetKitService:
 
             # ---- 2. 从DB加载 ----
             loop = asyncio.get_event_loop()
-            
+
             def _load():
                 with Session(engine) as session_db:
                     statement = select(SystemConfig).where(
-                        SystemConfig.key == TOKEN_KEY,
+                        SystemConfig.key == 'token',
+                        SystemConfig.platform == 'petkit',
                         SystemConfig.user_id == (self.user_id or 0),
                         SystemConfig.is_active == True
                     ).order_by(SystemConfig.id.desc())
@@ -131,22 +132,22 @@ class PetKitService:
                     if config:
                         return config.value
                 return None
-            
+
             config_value = await loop.run_in_executor(None, _load)
-            
+
             if config_value:
                 session_data = json.loads(config_value)
                 saved_time = session_data.get('timestamp', 0)
                 current_time = int(time.time() * 1000)
-                
+
                 if current_time - saved_time > SESSION_EXPIRY_MS:
                     logger.info("PetKit session expired, need re-login")
                     self._memory_session = None
                     return False
-                
+
                 # 加载成功，写入内存缓存
                 self._memory_session = session_data
-                
+
                 restored = await self._restore_session(session_data)
                 if restored:
                     self._initialized = True
@@ -156,7 +157,8 @@ class PetKitService:
         return False
 
     async def _save_session_to_db(self):
-        """Save current session data to database"""
+        """Save current session data to database
+        使用标准化 key='token' + platform='petkit'"""
         try:
             if not self.client or not self.session:
                 return
@@ -186,30 +188,38 @@ class PetKitService:
                 logger.debug(f"Could not extract session details: {e}")
 
             loop = asyncio.get_event_loop()
-            
+
             def _save():
                 with Session(engine) as session_db:
+                    # 查标准化 key='token' + platform='petkit'
                     statement = select(SystemConfig).where(
-                        SystemConfig.key == TOKEN_KEY,
+                        SystemConfig.key == 'token',
+                        SystemConfig.platform == 'petkit',
+                        SystemConfig.device_name == 'petkit',
                         SystemConfig.user_id == (self.user_id or 0),
-                        SystemConfig.is_active == True  # 只查询未删除的配置
+                        SystemConfig.is_active == True
                     )
                     config = session_db.exec(statement).first()
 
                     if not config:
                         config = SystemConfig(
                             user_id=self.user_id or 0,
-                            key=TOKEN_KEY,
+                            key='token',
+                            platform='petkit',
+                            device_name='petkit',
                             value=json.dumps(session_data),
-                            is_active=True
+                            is_encrypted=False,
+                            is_active=True,
                         )
                         session_db.add(config)
                     else:
                         config.value = json.dumps(session_data)
                         config.updated_at = int(time.time() * 1000)
+                        config.is_encrypted = False
                         session_db.add(config)
+
                     session_db.commit()
-            
+
             await loop.run_in_executor(None, _save)
             # 同步更新内存缓存
             self._memory_session = session_data
