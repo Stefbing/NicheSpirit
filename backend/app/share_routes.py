@@ -159,6 +159,8 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
 
     created_configs = []
     DEFAULT_DURATION_HOURS = 24
+
+    # 处理云平台（petkit/cloudpets）— 须有 account/password 凭据
     for platform, creds in from_configs.items():
         if not creds["account"] or not creds["password"]:
             continue
@@ -166,6 +168,10 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
         shared_account = f"{creds['account']}_shared_{request.to_user_id}"
 
         for dk in device_keys:
+            # 只创建匹配当前平台的 device_key 记录
+            dk_platform = dk.split('_', 1)[0] if '_' in dk else ''
+            if dk_platform != platform:
+                continue
             sc = SharedDeviceConfig(
                 share_id=share.id,
                 to_user_id=request.to_user_id,
@@ -177,6 +183,27 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
             )
             session.add(sc)
             created_configs.append({"device_key": dk, "platform": platform})
+
+    # 处理 BLE 设备（xiaomi）— 无 account/password，仅记录设备存在
+    ble_platforms = {'xiaomi'}
+    for bp in ble_platforms:
+        if bp not in platforms:
+            continue
+        for dk in device_keys:
+            dk_platform = dk.split('_', 1)[0] if '_' in dk else ''
+            if dk_platform != bp:
+                continue
+            sc = SharedDeviceConfig(
+                share_id=share.id,
+                to_user_id=request.to_user_id,
+                platform=bp,
+                device_key=dk,
+                config_account='shared_ble',
+                config_password='',
+                created_at=now_ms,
+            )
+            session.add(sc)
+            created_configs.append({"device_key": dk, "platform": bp})
 
     # 更新分享记录：接受后将 expires_at 设为设备可用时效（accepted_at + 24h）
     share.to_user_id = request.to_user_id

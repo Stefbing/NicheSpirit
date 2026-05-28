@@ -248,14 +248,19 @@ async def lifespan(app: FastAPI):
                         has_cloudpets = True
 
                     if not has_petkit and not has_cloudpets:
-                        await cache_manager.set(
-                            f'{cache_prefix}_dashboard_combined_data',
-                            {'petkit_devices': [], 'litterbox_stats': {},
-                             'cloudpets_servings': {}, 'cloudpets_plans': [],
-                             'has_shared_devices': False, 'device_platforms': list(user_platforms.values())},
-                            ttl=120
+                        # 仅 BLE 共享设备（xiaomi）时仍需渲染列表，不提前返回
+                        has_shared_ble = any(
+                            cred_info.get('_is_ble') for cred_info in (shared_creds or {}).values()
                         )
-                        return
+                        if not has_shared_ble:
+                            await cache_manager.set(
+                                f'{cache_prefix}_dashboard_combined_data',
+                                {'petkit_devices': [], 'litterbox_stats': {},
+                                 'cloudpets_servings': {}, 'cloudpets_plans': [],
+                                 'has_shared_devices': False, 'device_platforms': list(user_platforms.values())},
+                                ttl=120
+                            )
+                            return
 
                     petkit_devices, servings, plans = [], {}, []
                     from .utils.config_manager import update_cloud_device_token
@@ -345,14 +350,15 @@ async def lifespan(app: FastAPI):
                     ]
                     # 【修复】补充共享设备平台（SharedDeviceConfig 不在 DeviceCache 中）
                     existing_plats = {p['platform'] for p in device_platforms}
-                    for plat_name in (shared_creds or {}):
+                    for plat_name, cred_info in (shared_creds or {}).items():
                         if plat_name not in existing_plats:
+                            is_ble = cred_info.get('_is_ble', False)
                             device_platforms.append({
                                 'platform': plat_name,
                                 'device_name': f'shared_{plat_name}',
                                 'device_key': f'{plat_name}_shared',
-                                'is_ble': False,
-                                'is_complete': True,
+                                'is_ble': is_ble,
+                                'is_complete': not is_ble,
                                 'is_shared': True,
                             })
                     dashboard_data = {
@@ -361,7 +367,7 @@ async def lifespan(app: FastAPI):
                         'cloudpets_servings': servings,
                         'cloudpets_plans': plans,
                         'scale_stats': scale_stats,
-                        'has_shared_devices': any(p in (shared_creds or {}) for p in ['petkit', 'cloudpets']),
+                        'has_shared_devices': any(p in (shared_creds or {}) for p in ['petkit', 'cloudpets', 'xiaomi']),
                         'device_platforms': device_platforms,
                         'xiaomi_config': any(
                             r.is_ble and r.is_complete for r in user_platforms.values()
@@ -648,6 +654,9 @@ async def _get_shared_platform_credentials(user_id: int) -> dict:
 
                     if account_val and password_val:
                         result[platform] = {"account": account_val, "password": password_val}
+                    # BLE 平台（xiaomi）无需凭据，标记即可
+                    elif platform in ('xiaomi',):
+                        result[platform] = {"account": '', "password": '', '_is_ble': True}
 
                 return result
 
@@ -717,14 +726,15 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
 
         # 【修复】将共享设备平台也注入 device_platforms（SharedDeviceConfig 不在 DeviceCache 中）
         existing_platforms = {p['platform'] for p in dashboard_data['device_platforms']}
-        for platform_name in shared_creds:
+        for platform_name, cred_info in shared_creds.items():
             if platform_name not in existing_platforms:
+                is_ble = cred_info.get('_is_ble', False)
                 dashboard_data['device_platforms'].append({
                     'platform': platform_name,
                     'device_name': f'shared_{platform_name}',
                     'device_key': f'{platform_name}_shared',
-                    'is_ble': False,
-                    'is_complete': True,
+                    'is_ble': is_ble,
+                    'is_complete': not is_ble,  # BLE 设备在 B 处无法连接，标记为不完整
                     'is_shared': True,
                 })
 
