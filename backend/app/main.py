@@ -18,7 +18,7 @@ from .services.cloudpets_service import cloudpets_service, FeedingPlan as CloudP
 
 from .models.models import User, WeightRecord, SystemConfig, FamilyMember
 from .models.db import get_session, init_db, engine
-from .utils.cache_manager import cache_manager
+from .utils.cache_manager import cache_manager  # no-op 桩，所有 get/set 均为空操作
 from .utils.config_encryptor import ConfigEncryptor
 from .scheduler.task_scheduler import scheduler
 from .share_routes import router as share_router
@@ -191,202 +191,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"启动时清理脏数据失败（非致命）: {e}")
 
-    # Add scheduled tasks
-    async def refresh_dashboard_cache():
-        """后台定期刷新所有用户的仪表板缓存（无感刷新 + token 双写）"""
-        try:
-            from .utils.device_cache import device_cache
-            from sqlmodel import Session, select
-            from .models.models import SystemConfig
-            from .models.db import engine
-
-            logger.info("Starting background dashboard cache refresh...")
-            start_time = time.time()
-
-            # 获取所有有配置的用户ID
-            loop = asyncio.get_running_loop()
-
-            def _get_user_ids():
-                with Session(engine) as session:
-                    own_stmt = select(SystemConfig.user_id).where(
-                        SystemConfig.platform.in_(["petkit", "cloudpets"]),
-                        SystemConfig.key == "account",
-                        SystemConfig.is_active == True
-                    ).distinct()
-                    own_ids = session.exec(own_stmt).all()
-                    from .models.models import SharedDeviceConfig
-                    shared_stmt = select(SharedDeviceConfig.to_user_id).distinct()
-                    shared_ids = session.exec(shared_stmt).all()
-                    all_ids = set(own_ids) | set(shared_ids)
-                    return list(all_ids)
-
-            user_ids = await loop.run_in_executor(None, _get_user_ids)
-
-            if not user_ids:
-                logger.debug("No users with platform config found")
-                return
-
-            logger.info(f"Refreshing cache for {len(user_ids)} users: {user_ids}")
-
-            async def refresh_single_user(uid):
-                try:
-                    cache_prefix = f'user_{uid}'
-                    await cache_manager.delete(f'{cache_prefix}_dashboard_combined_data')
-
-                    # 从 DeviceCache 获取设备配置（避免重复查 DB）
-                    user_platforms = await device_cache.get_user_platforms(uid)
-                    pk_rec = user_platforms.get('petkit')
-                    cp_rec = user_platforms.get('cloudpets')
-
-                    has_petkit = pk_rec is not None and bool(pk_rec.account and pk_rec.password)
-                    has_cloudpets = cp_rec is not None and bool(cp_rec.account and cp_rec.password)
-
-                    shared_creds = await _get_shared_platform_credentials(uid)
-                    if 'petkit' in shared_creds and not has_petkit:
-                        has_petkit = True
-                    if 'cloudpets' in shared_creds and not has_cloudpets:
-                        has_cloudpets = True
-
-                    if not has_petkit and not has_cloudpets:
-                        # 仅 BLE 共享设备（xiaomi）时仍需渲染列表，不提前返回
-                        has_shared_ble = any(
-                            cred_info.get('_is_ble') for cred_info in (shared_creds or {}).values()
-                        )
-                        if not has_shared_ble:
-                            await cache_manager.set(
-                                f'{cache_prefix}_dashboard_combined_data',
-                                {'petkit_devices': [], 'litterbox_stats': {},
-                                 'cloudpets_servings': {}, 'cloudpets_plans': [],
-                                 'has_shared_devices': False, 'device_platforms': list(user_platforms.values())},
-                                ttl=120
-                            )
-                            return
-
-                    petkit_devices, servings, plans = [], {}, []
-                    from .utils.config_manager import update_cloud_device_token
-
-                    if has_petkit:
-                        pk_service, pk_is_temp = await _get_petkit_for_user(uid)
-                        if pk_service:
-                            try:
-                                petkit_devices = await pk_service.get_devices()
-                                # 【双写】token 刷新后写回设备配置组
-                                mem_session = getattr(pk_service, '_memory_session', None)
-                                if mem_session and pk_rec:
-                                    import json as _json
-                                    token_str = _json.dumps(mem_session)
-                                    await update_cloud_device_token(uid, 'petkit', token_str, pk_rec.device_name)
-                            finally:
-                                await _release_service(pk_service, pk_is_temp)
-                        await cache_manager.set(f'{cache_prefix}_petkit_devices', petkit_devices, ttl=300)
-
-                    if has_cloudpets:
-                        cp_service, cp_is_temp = await _get_cloudpets_for_user(uid)
-                        if cp_service:
-                            try:
-                                servings = await cp_service.get_servings_today() or {}
-                                plans = await cp_service.get_feeding_plans() or []
-                                # 【双写】token 刷新后写回设备配置组
-                                mem_token = getattr(cp_service, '_memory_token', None)
-                                if mem_token and cp_rec:
-                                    await update_cloud_device_token(uid, 'cloudpets', mem_token, cp_rec.device_name)
-                            finally:
-                                await _release_service(cp_service, cp_is_temp)
-                        await cache_manager.set(f'{cache_prefix}_cloudpets_servings', servings, ttl=120)
-                        await cache_manager.set(f'{cache_prefix}_cloudpets_plans', plans, ttl=300)
-
-                    if petkit_devices and has_petkit:
-                        pk_service, pk_is_temp = await _get_petkit_for_user(uid)
-                        if pk_service:
-                            try:
-                                for device in petkit_devices:
-                                    if hasattr(device, 'id'):
-                                        cache_key = f'{cache_prefix}_petkit_stats_{device.id}'
-                                        stats = await pk_service.get_daily_stats(device.id)
-                                        await cache_manager.set(cache_key, stats, ttl=180)
-                            finally:
-                                await _release_service(pk_service, pk_is_temp)
-
-                    # 体脂秤统计
-                    scale_stats = {'today_count': 0, 'latest_body_fat': None}
-                    try:
-                        from datetime import datetime, timedelta
-                        from .models.models import WeightRecord
-                        from .models.db import engine
-                        from sqlalchemy import func
-
-                        def _query_scale_stats():
-                            with Session(engine) as db_session:
-                                today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-                                today_end = int(datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp() * 1000)
-                                count_stmt = select(func.count()).select_from(WeightRecord).where(
-                                    WeightRecord.user_id == uid,
-                                    WeightRecord.timestamp >= today_start,
-                                    WeightRecord.timestamp <= today_end
-                                )
-                                today_count = db_session.exec(count_stmt).one()
-                                latest_stmt = select(WeightRecord.body_fat).where(
-                                    WeightRecord.user_id == uid,
-                                    WeightRecord.timestamp >= today_start,
-                                    WeightRecord.timestamp <= today_end,
-                                    WeightRecord.body_fat.isnot(None)
-                                ).order_by(WeightRecord.timestamp.desc()).limit(1)
-                                latest_body_fat_raw = db_session.exec(latest_stmt).first()
-                                return {'today_count': today_count, 'latest_body_fat': round(latest_body_fat_raw, 1) if latest_body_fat_raw else None}
-                        scale_stats = await loop.run_in_executor(None, _query_scale_stats)
-                    except Exception as e:
-                        logger.error(f'[Refresh] 体脂秤统计失败: {e}')
-
-                    # 刷新 DeviceCache（token 已更新）
-                    await device_cache.invalidate_user(uid)
-
-                    # 刷新 DeviceCache 后重新获取 device_platforms
-                    user_platforms = await device_cache.get_user_platforms(uid)
-                    # 构建设备平台列表（自有设备）
-                    device_platforms = [
-                        {'platform': p, 'device_name': r.device_name, 'device_key': r.device_key,
-                         'is_ble': r.is_ble, 'is_complete': r.is_complete, 'is_shared': False}
-                        for p, r in user_platforms.items()
-                    ]
-                    # 【修复】补充共享设备平台（SharedDeviceConfig 不在 DeviceCache 中）
-                    existing_plats = {p['platform'] for p in device_platforms}
-                    for plat_name, cred_info in (shared_creds or {}).items():
-                        if plat_name not in existing_plats:
-                            is_ble = cred_info.get('_is_ble', False)
-                            device_platforms.append({
-                                'platform': plat_name,
-                                'device_name': f'shared_{plat_name}',
-                                'device_key': f'{plat_name}_shared',
-                                'is_ble': is_ble,
-                                'is_complete': not is_ble,
-                                'is_shared': True,
-                            })
-                    dashboard_data = {
-                        'petkit_devices': petkit_devices,
-                        'litterbox_stats': {},
-                        'cloudpets_servings': servings,
-                        'cloudpets_plans': plans,
-                        'scale_stats': scale_stats,
-                        'has_shared_devices': any(p in (shared_creds or {}) for p in ['petkit', 'cloudpets', 'xiaomi']),
-                        'device_platforms': device_platforms,
-                        'xiaomi_config': any(
-                            r.is_ble and r.is_complete for r in user_platforms.values()
-                        ),
-                    }
-                    await cache_manager.set(f'{cache_prefix}_dashboard_combined_data', dashboard_data, ttl=120)
-                    logger.info(f"✓ Cache refreshed for user {uid}")
-                except Exception as e:
-                    logger.error(f"Failed to refresh cache for user {uid}: {e}")
-
-            await asyncio.gather(*[refresh_single_user(uid) for uid in user_ids], return_exceptions=True)
-            elapsed = time.time() - start_time
-            logger.info(f"Dashboard cache refresh completed in {elapsed:.2f}s")
-        except Exception as e:
-            logger.error(f"Dashboard cache refresh failed: {e}")
-
-    # 每90秒刷新一次缓存（比缓存过期时间60s长，确保在过期前刷新）
-    await scheduler.add_task('dashboard_cache_refresh', refresh_dashboard_cache, interval=90, immediate=False)
-
     # 后台定期清理过期分享（每5分钟执行一次）
     async def cleanup_expired_shares():
         """自动撤销所有已过期的分享"""
@@ -425,8 +229,6 @@ async def lifespan(app: FastAPI):
 
     await scheduler.add_task('expired_share_cleanup', cleanup_expired_shares, interval=300, immediate=True)
     await scheduler.start()
-
-    # CacheManager 为惰性过期，无需后台清理
 
     logger.info(f"=== App initialized in {time.time() - start_time:.2f}s ===")
 
@@ -518,55 +320,7 @@ async def _release_service(service, is_temp):
             pass
 
 # 静态页面路由已全部移除（前端使用微信小程序原生页面）
-# --- Cache & Dashboard APIs ---
-@app.get("/api/cache/status")
-async def cache_status():
-    """获取缓存状态和任务统计"""
-    try:
-        # 获取任务调度器统计
-        task_stats = scheduler.get_task_stats()
-
-        return {
-            "cache_size": await cache_manager.size(),
-            "last_refresh": await cache_manager.get('dashboard_last_refresh'),
-            "scheduled_tasks": task_stats
-        }
-    except Exception as e:
-        logger.error(f"Failed to get cache status: {e}")
-        return {"error": str(e)}
-
-@app.post("/api/cache/refresh")
-async def force_refresh_cache(user_id: Optional[int] = None):
-    """强制刷新指定用户的缓存数据"""
-    try:
-        if not user_id:
-            return {"status": "error", "message": "请提供 user_id"}
-
-        # 清除该用户的所有缓存
-        cache_prefix = f'user_{user_id}'
-        await cache_manager.delete(f'{cache_prefix}_dashboard_combined_data')
-        await cache_manager.delete(f'{cache_prefix}_petkit_devices')
-        await cache_manager.delete(f'{cache_prefix}_cloudpets_servings')
-        await cache_manager.delete(f'{cache_prefix}_cloudpets_plans')
-        # 【新增】清除体脂秤统计相关缓存（如果有）
-        await cache_manager.delete(f'{cache_prefix}_scale_stats')
-
-        logger.info(f"Cache refreshed for user {user_id}")
-        return {"status": "success", "message": "缓存已清除，下次访问将重新加载"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"刷新失败: {str(e)}")
-
-@app.post("/api/cache/clear")
-async def clear_all_cache():
-    """Clear all cached data (for debugging)"""
-    try:
-        await cache_manager.clear()
-        logger.info("All cache cleared")
-        return {"status": "success", "message": "缓存已清空"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"清理缓存失败: {str(e)}")
-
-
+# --- Dashboard API ---
 async def _get_shared_platform_credentials(user_id: int) -> dict:
     """
     【新增】查询该用户接受的共享设备分享者的原始凭据
@@ -658,6 +412,12 @@ async def _get_shared_platform_credentials(user_id: int) -> dict:
                     elif platform in ('xiaomi',):
                         result[platform] = {"account": '', "password": '', '_is_ble': True}
 
+                # 【诊断】打印共享凭据查找结果
+                import logging as _log
+                _log.getLogger(__name__).info(
+                    f'[SharedCreds] user={user_id} found_shares={len(shares)}, '
+                    f'platforms={list(platform_set)}, result={list(result.keys())}'
+                )
                 return result
 
         loop = asyncio.get_running_loop()
@@ -669,7 +429,7 @@ async def _get_shared_platform_credentials(user_id: int) -> dict:
 
 @app.get("/api/dashboard/data")
 async def get_dashboard_data(user_id: Optional[int] = None, session: Session = Depends(get_session)):
-    """Get aggregated dashboard data (cached, user-specific) - 优化版：并行执行+批量配置"""
+    """Get aggregated dashboard data (no cache, direct DB + live API)"""
     try:
         # 提前导入，避免作用域问题
         from .utils.config_manager import get_config_from_db, get_configs_batch
@@ -679,11 +439,6 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
             user_id = await _get_first_user_with_platform("cloudpets") or await _get_first_user_with_platform("petkit")
             if not user_id:
                 return {"petkit_devices": [], "litterbox_stats": {}, "cloudpets_servings": {}, "cloudpets_plans": []}
-
-        cache_prefix = f'user_{user_id}'
-        cached_data = await cache_manager.get(f'{cache_prefix}_dashboard_combined_data')
-        if cached_data:
-            return cached_data
 
         # 从 DeviceCache 获取该用户的设备平台配置
         from .utils.device_cache import device_cache
@@ -704,9 +459,14 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
             petkit_username = shared_creds['petkit']['account']
             petkit_password = shared_creds['petkit']['password']
             logger.info(f"[Dashboard] 用户 {user_id} 使用共享的 PetKit 凭证")
+        # 标记是否使用共享凭据（阻止 token 回写到接受者的 SystemConfig）
+        using_shared_petkit = 'petkit' in shared_creds and not petkit_rec
+        using_shared_cloudpets = 'cloudpets' in shared_creds and not cloudpets_rec
+
         if 'cloudpets' in shared_creds and not cloudpets_account:
             cloudpets_account = shared_creds['cloudpets']['account']
             cloudpets_password = shared_creds['cloudpets']['password']
+            using_shared_cloudpets = True
             logger.info(f"[Dashboard] 用户 {user_id} 使用共享的 CloudPets 凭证")
 
         dashboard_data = {}
@@ -725,9 +485,10 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
         ]
 
         # 【修复】将共享设备平台也注入 device_platforms（SharedDeviceConfig 不在 DeviceCache 中）
-        existing_platforms = {p['platform'] for p in dashboard_data['device_platforms']}
+        # 只排除已有完整自有配置的平台，不完整条目（如残留的 token）不阻挡共享注入
+        existing_complete_platforms = {p['platform'] for p in dashboard_data['device_platforms'] if p['is_complete']}
         for platform_name, cred_info in shared_creds.items():
-            if platform_name not in existing_platforms:
+            if platform_name not in existing_complete_platforms:
                 is_ble = cred_info.get('_is_ble', False)
                 dashboard_data['device_platforms'].append({
                     'platform': platform_name,
@@ -740,22 +501,26 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
 
         dashboard_data['has_shared_devices'] = len(shared_creds) > 0
 
+        # 【修复】清理不完整条目：如果共享凭据中有对应平台但 DeviceCache 中只有不完整配置，
+        # 说明是之前的 token 泄露残留，删除它防止阻挡共享注入
+        for platform_name in shared_creds:
+            rec = user_platforms.get(platform_name)
+            if rec and not rec.is_complete and not rec.is_ble:
+                logger.info(f'[Dashboard] 清理 user={user_id} 的不完整 {platform_name} 残留配置')
+                await device_cache.invalidate_platform(user_id, platform_name)
+
         # 并行获取PetKit设备和CloudPets数据
         async def fetch_petkit_devices():
-            """获取PetKit设备列表（含 token 双写）"""
-            petkit_devices = await cache_manager.get(f'{cache_prefix}_petkit_devices')
-            if petkit_devices:
-                return petkit_devices
-
+            """获取PetKit设备列表（含 token 双写，共享凭据时不写回）"""
             if not petkit_username or not petkit_password:
                 return []
 
             if state.petkit and getattr(state.petkit, 'user_id', None) == user_id:
                 pk_svc = state.petkit
                 devices = await pk_svc.get_devices()
-                # 【双写】token 刷新后写回设备配置组
                 mem_session = getattr(pk_svc, '_memory_session', None)
-                if mem_session and petkit_rec:
+                # 【修复】共享凭据的 token 不写回接受者的 SystemConfig
+                if mem_session and petkit_rec and not using_shared_petkit:
                     from .utils.config_manager import update_cloud_device_token
                     await update_cloud_device_token(user_id, 'petkit', json.dumps(mem_session), petkit_rec.device_name)
             else:
@@ -763,16 +528,15 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
                 await temp_service.initialize()
                 devices = await temp_service.get_devices()
                 mem_session = getattr(temp_service, '_memory_session', None)
-                if mem_session and petkit_rec:
+                if mem_session and petkit_rec and not using_shared_petkit:
                     from .utils.config_manager import update_cloud_device_token
                     await update_cloud_device_token(user_id, 'petkit', json.dumps(mem_session), petkit_rec.device_name)
                 await temp_service.close()
 
-            await cache_manager.set(f'{cache_prefix}_petkit_devices', devices, ttl=300)
             return devices
 
         async def fetch_cloudpets_data():
-            """获取CloudPets数据（servings + plans，含 token 双写）"""
+            """获取CloudPets数据（servings + plans，共享凭据时不写回 token）"""
             result = {"servings": {}, "plans": []}
 
             if not cloudpets_account or not cloudpets_password:
@@ -783,7 +547,8 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
                 servings = await cp_svc.get_servings_today()
                 plans = await cp_svc.get_feeding_plans()
                 mem_token = getattr(cp_svc, '_memory_token', None)
-                if mem_token and cloudpets_rec:
+                # 【修复】共享凭据的 token 不写回接受者的 SystemConfig
+                if mem_token and cloudpets_rec and not using_shared_cloudpets:
                     from .utils.config_manager import update_cloud_device_token
                     await update_cloud_device_token(user_id, 'cloudpets', mem_token, cloudpets_rec.device_name)
             else:
@@ -793,13 +558,12 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
                 servings = await temp_service.get_servings_today()
                 plans = await temp_service.get_feeding_plans()
                 mem_token = getattr(temp_service, '_memory_token', None)
-                if mem_token and cloudpets_rec:
+                # 【修复】共享凭据的 token 不写回接受者的 SystemConfig
+                if mem_token and cloudpets_rec and not using_shared_cloudpets:
                     from .utils.config_manager import update_cloud_device_token
                     await update_cloud_device_token(user_id, 'cloudpets', mem_token, cloudpets_rec.device_name)
                 await temp_service.close()
 
-            await cache_manager.set(f'{cache_prefix}_cloudpets_servings', servings, ttl=120)
-            await cache_manager.set(f'{cache_prefix}_cloudpets_plans', plans, ttl=300)
             result["servings"] = servings or {}
             result["plans"] = plans or []
             return result
@@ -867,7 +631,13 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
             logger.error(f'[Dashboard] 获取体脂秤统计失败: {e}')
             dashboard_data['scale_stats'] = {'today_count': 0, 'latest_body_fat': None}
 
-        await cache_manager.set(f'{cache_prefix}_dashboard_combined_data', dashboard_data, ttl=120)
+        # 【诊断】打印 device_platforms 内容，确认共享设备是否注入
+        plat_summary = [
+            f"{p.get('platform')}(shared={p.get('is_shared', False)},complete={p.get('is_complete', False)})"
+            for p in dashboard_data.get('device_platforms', [])
+        ]
+        logger.info(f'[Dashboard] user={user_id} device_platforms: {plat_summary}')
+
         return dashboard_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取仪表板数据失败：{str(e)}")
@@ -881,11 +651,6 @@ async def petkit_devices(user_id: Optional[int] = None):
             if not user_id:
                 return []
 
-        cache_key = f'user_{user_id}_petkit_devices'
-        cached_devices = await cache_manager.get(cache_key)
-        if cached_devices:
-            return cached_devices
-
         service, is_temp = await _get_petkit_for_user(user_id)
         if not service:
             return []
@@ -895,7 +660,6 @@ async def petkit_devices(user_id: Optional[int] = None):
         finally:
             await _release_service(service, is_temp)
 
-        await cache_manager.set(cache_key, devices, ttl=300)
         return devices
     except Exception as e:
         logger.error(f"Failed to fetch PetKit devices: {e}")

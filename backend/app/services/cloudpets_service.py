@@ -89,6 +89,14 @@ class CloudPetsService:
         # Try to load existing token from database
         if await self._load_token_from_db():
             logger.info("CloudPets token loaded from DB")
+            # 【修复】即使从DB加载了token，也保存account/password供401重登使用
+            if not self.account or not self.password:
+                acct = await self._get_config("account", user_id=uid)
+                pwd = await self._get_config("password", user_id=uid)
+                if acct and pwd:
+                    self.account = self._normalize_account(acct)
+                    self.password = pwd
+                    logger.info("[401 Fix] 已保存 account/password 供重登使用")
             return True
         
         # 凭据来源：优先参数传入，其次 DB 查询

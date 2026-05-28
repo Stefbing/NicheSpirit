@@ -14,6 +14,10 @@ App({
     environment: "development",
     // 待处理的分享 token（登录前收到，登录后处理）
     _pendingShareToken: '',
+    /** 入口场景值（1007=分享卡片，其他见微信文档） */
+    _pendingShareScene: 0,
+    /** 启动路径（用于判断是否需要 reLaunch） */
+    _launchPath: '',
 
     // 蓝牙状态（简化）
     bleAdapterInitialized: false,
@@ -84,7 +88,23 @@ App({
     this._discoveredScaleDevices = {};
   },
 
-  onLaunch() {
+  onLaunch(options) {
+    // 【修复】解析入口参数：启动路径、场景值、分享令牌
+    if (options) {
+      console.log('[App] 🚀 onLaunch:', JSON.stringify({
+        path: options.path,
+        scene: options.scene,
+        query: options.query,
+      }));
+      this.globalData._launchPath = options.path || '';
+      this.globalData._pendingShareScene = options.scene || 0;
+      if (options.query && options.query.share_token) {
+        this.globalData._pendingShareToken = options.query.share_token;
+        console.log('[App] 📥 从 onLaunch 捕获 share_token:', options.query.share_token,
+          '| 场景值:', options.scene, '(1007=分享卡片)');
+      }
+    }
+
     try {
       // 初始化云开发
       const config = cloudRequest.getConfig ? cloudRequest.getConfig() : null;
@@ -99,9 +119,16 @@ App({
     }
   },
 
-  onShow() {
-    // 小程序从后台切回前台时，不做处理
-    // 数据清除已在 startContinuousScan 中执行
+  onShow(options) {
+    // 【修复】小程序从后台切回前台时（如点击聊天中的分享卡片），捕获 share_token
+    if (options) {
+      if (options.query && options.query.share_token) {
+        this.globalData._pendingShareToken = options.query.share_token;
+        this.globalData._pendingShareScene = options.scene || 0;
+        console.log('[App] 📥 从 onShow 捕获 share_token:', options.query.share_token,
+          '| 场景值:', options.scene, '(1007=分享卡片)');
+      }
+    }
   },
 
   /**
@@ -119,9 +146,25 @@ App({
     const preventSilentLogin = wx.getStorageSync('preventSilentLogin');
 
     if (userInfo && userInfo.user_id && token) {
-      // 已有登录态 → 跳转首页（BLE 由首页根据 DeviceCache 决定是否启动）
       console.log('[App] 已有登录态，user_id:', userInfo.user_id);
-      wx.reLaunch({ url: '/pages/index/index' });
+      console.log('[App] 启动路径:', this.globalData._launchPath,
+        '| pendingToken:', this.globalData._pendingShareToken ? '有' : '无');
+
+      // 【修复】关键：如果入口路径已经是 pages/index/index（分享卡片/正常启动），
+      // 不需要 reLaunch。让微信系统自然创建页面，避免 reLaunch 清空 URL 参数。
+      // 如果入口是其他页面，再 reLaunch 到首页并携带 share_token。
+      const launchPath = this.globalData._launchPath || '';
+      if (launchPath === 'pages/index/index' || !launchPath) {
+        console.log('[App] ✅ 已在首页路径，跳过 reLaunch，等待页面自然创建');
+        return;
+      }
+
+      // 其他路径 → reLaunch 到首页，携带 share_token
+      let url = '/pages/index/index';
+      if (this.globalData._pendingShareToken) {
+        url += `?share_token=${this.globalData._pendingShareToken}`;
+      }
+      wx.reLaunch({ url });
       return;
     }
 

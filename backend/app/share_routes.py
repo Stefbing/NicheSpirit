@@ -1,9 +1,11 @@
 """设备分享 API 路由"""
-import json, time, uuid, hashlib
+import json, time, uuid, hashlib, logging
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlmodel import Session, select
+
+logger = logging.getLogger(__name__)
 
 from .models.models import User, DeviceShare, SharedDeviceConfig, SystemConfig
 from .models.db import get_session
@@ -157,6 +159,9 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
     platforms = _parse_device_keys(device_keys)
     from_configs = _get_device_configs_by_platforms(session, share.from_user_id, platforms)
 
+    logger.info(f'[AcceptShare] token={request.share_token} from={share.from_user_id} to={request.to_user_id} '
+                f'platforms={platforms} from_configs={list(from_configs.keys())}')
+
     created_configs = []
     DEFAULT_DURATION_HOURS = 24
 
@@ -212,6 +217,11 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
     share.expires_at = now_ms + DEFAULT_DURATION_HOURS * 3600 * 1000
     session.add(share)
     session.commit()
+
+    # 【诊断】确认数据库状态
+    logger.info(f'[AcceptShare] ✅ 已完成: share_id={share.id} status={share.status} '
+                f'to_user={share.to_user_id} configs_created={len(created_configs)} '
+                f'configs={created_configs}')
 
     # 清除接受者的设备缓存
     try:
@@ -389,6 +399,37 @@ async def list_shares(user_id: int, role: str = "from", session: Session = Depen
         ).all()
 
     return {"shares": [_format_share_output(s) for s in shares]}
+
+
+@router.get("/pending-from-user")
+async def pending_share_from_user(from_user_id: int, session: Session = Depends(get_session)):
+    """
+    查询指定分享者最新的 pending 分享（from_uid 兜底方案）
+    当 share_token 在入口参数中丢失时，通过 from_user_id 反查分享记录
+    """
+    now_ms = int(time.time() * 1000)
+    share = session.exec(
+        select(DeviceShare).where(
+            DeviceShare.from_user_id == from_user_id,
+            DeviceShare.status == "pending",
+        ).order_by(DeviceShare.created_at.desc())
+    ).first()
+
+    if not share:
+        return {"found": False, "share": None}
+
+    # 检查链接是否过期
+    link_expiry = share.created_at + 24 * 3600 * 1000
+    if now_ms > link_expiry:
+        share.status = "revoked"
+        session.add(share)
+        session.commit()
+        return {"found": False, "share": None}
+
+    return {
+        "found": True,
+        "share": _format_share_output(share),
+    }
 
 
 @router.post("/revoke")

@@ -509,7 +509,13 @@ Page({
     });
     console.log('[Login] ✅ 登录成功，user_id:', user_id);
     wx.showLoading({ title: '正在进入…', mask: true });
-    wx.reLaunch({ url: '/pages/index/index' });
+    // 【修复】如果有待处理的分享 token，带到 URL 中，防止 reLaunch 后丢失
+    const app = getApp();
+    let url = '/pages/index/index';
+    if (app.globalData._pendingShareToken) {
+      url += `?share_token=${app.globalData._pendingShareToken}`;
+    }
+    wx.reLaunch({ url });
   },
 
   // ==================== 静默登录 ====================

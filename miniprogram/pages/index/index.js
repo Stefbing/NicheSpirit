@@ -32,11 +32,17 @@ Page({
   onLoad: function (query) {
     wx.hideHomeButton();
 
-    // 【修复】在检查登录状态前，优先捕获分享token存到全局，避免跳转登录后丢失
+    // 【修复】捕获分享参数：优先 URL 参数，其次全局暂存（从 app.onLaunch/onShow 捕获）
+    const app = getApp()
     if (query && query.share_token) {
-      const app = getApp()
       app.globalData._pendingShareToken = query.share_token
-      console.log('[首页] 📥 从分享卡片捕获 share_token:', query.share_token)
+      console.log('[首页] 📥 从 onLoad query 捕获 share_token:', query.share_token)
+    }
+
+    // 记录 from_uid 供兜底查找
+    if (query && query.from_uid) {
+      this._fromUid = query.from_uid
+      console.log('[首页] 📥 从 onLoad 记录 from_uid:', query.from_uid)
     }
 
     const userInfo = wx.getStorageSync('userInfo');
@@ -45,6 +51,17 @@ Page({
       return;
     }
     this.setData({ userInfo });
+
+    // 【修复】已登录且有全局待处理分享 → 立即处理（场景：onLaunch/onShow 已捕获但 query 中没有）
+    if (app.globalData._pendingShareToken) {
+      console.log('[首页] 📥 从全局数据恢复并处理 share_token:', app.globalData._pendingShareToken)
+      this.handleIncomingShare(app.globalData._pendingShareToken)
+    }
+
+    // 【修复】from_uid 兜底：没有 share_token 但有分享者 ID → 反查后端
+    if (!app.globalData._pendingShareToken && this._fromUid) {
+      this.checkPendingShareByFromUid(this._fromUid)
+    }
 
     this.updateGreeting();
     this.loadUserDevices();
@@ -67,9 +84,14 @@ Page({
 
     const pendingToken = app.globalData._pendingShareToken;
     if (pendingToken && this.data.userInfo && this.data.userInfo.user_id) {
-      app.globalData._pendingShareToken = '';
-      this.setData({ shareToken: pendingToken });
+      console.log('[首页] 📥 onShow 检测到待处理分享:', pendingToken)
       this.handleIncomingShare(pendingToken);
+    }
+
+    // 【修复】from_uid 兜底（onLoad 中没处理到的场景，如 app 从后台切回）
+    if (!app.globalData._pendingShareToken && this._fromUid && !this._shareCheckedFromUid) {
+      console.log('[首页] 📥 onShow 检测到 from_uid，兜底检查分享:', this._fromUid)
+      this.checkPendingShareByFromUid(this._fromUid)
     }
 
     if (this.data.userInfo) {
@@ -987,6 +1009,7 @@ Page({
     const userInfo = this.data.userInfo || wx.getStorageSync('userInfo')
     const userName = userInfo ? (userInfo.nickname || '我的智能家') : '好友'
     const token = this._pendingShareToken || ''
+    const userId = userInfo ? userInfo.user_id : ''
 
     // 分享后清除暂存 token
     this._pendingShareToken = ''
@@ -997,14 +1020,16 @@ Page({
       // 采用懒加载策略：传参带特殊标记，B 打开时后端实时查询
       return {
         title: `${userName} 邀请您使用智能设备`,
-        path: `/pages/index/index?from_uid=${userInfo.user_id || ''}`,
+        path: `/pages/index/index?from_uid=${userId || ''}`,
         imageUrl: '',
       }
     }
 
     return {
       title: `${userName} 邀请您使用智能设备`,
-      path: `/pages/index/index?share_token=${token}`,
+      // 【修复】同时携带 share_token 和 from_uid，from_uid 作为兜底
+      // 即使 share_token 在入口参数中丢失，仍可通过 from_uid 反查分享
+      path: `/pages/index/index?share_token=${token}&from_uid=${userId}`,
       imageUrl: '',
     }
   },
@@ -1024,6 +1049,32 @@ Page({
   },
 
   /**
+   * 【修复】通过 from_uid 反查后端 pending 分享（兜底方案）
+   * 当 share_token 在入口参数中丢失时，用分享者ID反查最新pending分享
+   */
+  async checkPendingShareByFromUid(fromUserId) {
+    if (!fromUserId) return
+    // 防止重复查询
+    this._shareCheckedFromUid = true
+
+    try {
+      const res = await cloudRequest.callContainer({
+        path: `/api/share/pending-from-user?from_user_id=${fromUserId}`,
+        method: 'GET',
+      })
+      console.log('[Share] from_uid 反查结果:', res)
+      if (res && res.found && res.share && res.share.share_token) {
+        console.log('[Share] ✅ from_uid 兜底成功，找到分享 token:', res.share.share_token)
+        this.handleIncomingShare(res.share.share_token)
+      } else {
+        console.log('[Share] ℹ️ from_uid 未找到可用分享')
+      }
+    } catch (err) {
+      console.error('[Share] from_uid 反查失败:', err)
+    }
+  },
+
+  /**
    * 处理收到的分享（B 打开分享卡片时调用）
    */
   async handleIncomingShare(shareToken) {
@@ -1037,9 +1088,12 @@ Page({
       return
     }
 
+    // 【修复】清除全局待处理 token，防止 onShow 重复处理
+    app.globalData._pendingShareToken = ''
+
     // 已登录，显示接受分享确认
     try {
-      // 查询分享者信息（可选，用于显示名称）
+      console.log('[Share] ✅ 显示接受分享弹窗，token:', shareToken)
       this.setData({
         showAcceptShare: true,
         shareToken: shareToken,
@@ -1076,7 +1130,12 @@ Page({
       wx.hideLoading()
       if (res && res.success) {
         wx.showToast({ title: '设备已添加', icon: 'success', duration: 2000 })
-        // 重新加载设备列表
+        // 【修复】清除前端30秒dashboard缓存，确保重新加载时拉取最新数据
+        const app = getApp()
+        app.clearDashboardCache()
+        // 重置加载锁，允许重新加载
+        this.isLoadingDevices = false
+        this.devicesLoaded = false
         setTimeout(() => this.loadUserDevices(), 1500)
       } else {
         wx.showToast({ title: res?.message || '配置失败', icon: 'none' })
