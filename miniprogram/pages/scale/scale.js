@@ -453,10 +453,13 @@ Page({
       // 震动反馈
       wx.vibrateShort({ type: 'medium' });
 
-      // 延迟一下确保 setData 完成，然后保存
-      setTimeout(() => {
-        this.autoSaveMeasurement();
-      }, 100);
+      // 成员数据完整时才自动保存，否则等待用户编辑成员后触发
+      const memberComplete = this.data.currentMember.height > 0 && this.data.currentMember.age > 0;
+      if (memberComplete) {
+        setTimeout(() => { this.autoSaveMeasurement(); }, 100);
+      } else {
+        console.log('[Scale] ⏳ 成员数据不完整，延后保存，等待用户补充');
+      }
 
       // 启动10秒倒计时自动重置
       this.startResetCountdown();
@@ -1311,9 +1314,10 @@ Page({
             name: updatedMember.name,
           }
         }, () => {
-          // 编辑完后如果有锁定数据，重新计算体脂
+          // 编辑完后如果有锁定数据，重新计算体脂并自动保存
           if (this.data.lockedWeight) {
             this.calculateBodyMetrics(this.data.lockedWeight, this.data.lockedImpedance);
+            setTimeout(() => { this.autoSaveMeasurement(); }, 200);
           }
         });
 

@@ -84,13 +84,10 @@ CREATE TABLE IF NOT EXISTS weightrecord (
     bone_mass DECIMAL(5,2),                             -- 骨量（kg）
     bmr DECIMAL(8,2),                                   -- 基础代谢（kcal）
     timestamp BIGINT NOT NULL,                          -- 记录时间戳（毫秒）
-    xiaomi_pushed TINYINT(1) DEFAULT 0,                 -- 是否已推送至小米：0=否, 1=是
-    xiaomi_push_time BIGINT,                            -- 小米推送时间戳（毫秒）
     created_at BIGINT NOT NULL,                         -- 创建时间戳（毫秒）
 
-    INDEX idx_user_timestamp (user_id, timestamp DESC), -- 联合索引：加速查询用户最新记录
-    INDEX idx_member_timestamp (member_id, timestamp DESC), -- 联合索引：加速查询成员历史记录
-    INDEX idx_xiaomi_pending (xiaomi_pushed, timestamp) -- 联合索引：加速查询待推送记录
+    INDEX idx_user_timestamp (user_id, timestamp DESC),
+    INDEX idx_member_timestamp (member_id, timestamp DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='体重记录表（关联私有家庭成员，用于体脂趋势分析）';
 
 -- ============================================================================

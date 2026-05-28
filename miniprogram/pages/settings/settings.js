@@ -201,10 +201,9 @@ Page({
   // ====== 功能区二事件 ======
 
   /**
-   * 点击编辑设备配置 → 跳转至原来 config 页
+   * 点击编辑设备配置（已废弃 - 配置管理移至首页设备列表）
    */
-  onEditDeviceConfig(e) {
-    const platform = e.currentTarget.dataset.platform;
-    wx.navigateTo({ url: `/pages/config/config?platform=${platform}` });
+  onEditDeviceConfig() {
+    wx.showToast({ title: '请在首页管理设备配置', icon: 'none' });
   },
 });

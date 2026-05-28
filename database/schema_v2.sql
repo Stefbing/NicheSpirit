@@ -118,7 +118,6 @@ CREATE TABLE `weightrecord` (
 
     INDEX `idx_user_timestamp` (`user_id`, `timestamp` DESC),
     INDEX `idx_member_timestamp` (`member_id`, `timestamp` DESC),
-    INDEX `idx_xiaomi_pending` (`xiaomi_pushed`, `timestamp`),
 
     CONSTRAINT `fk_weight_user` FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON DELETE CASCADE,
     CONSTRAINT `fk_weight_member` FOREIGN KEY (`member_id`) REFERENCES `family_member`(`id`) ON DELETE CASCADE

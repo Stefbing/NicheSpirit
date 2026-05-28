@@ -119,12 +119,9 @@ App({
     const preventSilentLogin = wx.getStorageSync('preventSilentLogin');
 
     if (userInfo && userInfo.user_id && token) {
-      // 已有登录态 → 跳转首页 + 初始化蓝牙
+      // 已有登录态 → 跳转首页（BLE 由首页根据 DeviceCache 决定是否启动）
       console.log('[App] 已有登录态，user_id:', userInfo.user_id);
       wx.reLaunch({ url: '/pages/index/index' });
-      setTimeout(() => {
-        this.checkAndInitBluetooth(userInfo.user_id);
-      }, 500);
       return;
     }
 
@@ -147,7 +144,7 @@ App({
     this.globalData.dashboardCacheTime = 0;
     this.globalData.dashboardFetching = false;
     this.globalData.dashboardFetchPromise = null;
-    console.log('[App] 🧹 Dashboard 缓存已清除');
+    console.log('[App] 🧹 Dashboard 缓存已清除（包括在途请求）');
   },
 
   /**

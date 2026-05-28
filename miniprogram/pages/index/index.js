@@ -306,8 +306,16 @@ Page({
         userDevices,
         petDevices,
         healthDevices,
-        devicesLoaded: true  // 标记已加载
+        devicesLoaded: true
       })
+
+      // BLE 条件启动：仅当用户配置了体脂秤时才初始化蓝牙
+      if (dashboardData.xiaomi_config === true) {
+        const app = getApp()
+        if (!app.globalData.bleAdapterInitialized && !app.globalData.bluetoothInitializing) {
+          app.checkAndInitBluetooth(this.data.userInfo.user_id)
+        }
+      }
     } catch (err) {
       console.error('加载设备列表失败:', err)
       wx.showToast({ 
@@ -315,7 +323,6 @@ Page({
         icon: 'none' 
       })
     } finally {
-      // 无论成功或失败，都重置加载状态
       this.isLoadingDevices = false
     }
   },
@@ -403,17 +410,19 @@ Page({
         }
       })
       
-      // 如果是体脂秤，自动初始化"自己"成员
+      // 如果是体脂秤，自动初始化"自己"成员（BLE 由后续 loadUserDevices 根据 xiaomi_config 条件启动）
       if (selectedDeviceType === 'scale') {
         await this.initScaleSelfMember()
-        console.log('[首页] 体脂秤添加成功，立即初始化蓝牙')
-        app.checkAndInitBluetooth()
+        console.log('[首页] 体脂秤添加成功')
       }
       
       wx.hideLoading()
       wx.showToast({ title: '添加成功', icon: 'success' })
       
       this.closeDeviceConfigModal()
+      // 清除缓存及在途请求，强制刷新
+      const app = getApp()
+      app.clearDashboardCache()
       await this.loadUserDevices()
     } catch (err) {
       wx.hideLoading()
@@ -608,17 +617,20 @@ Page({
       await this.initScaleSelfMember()
 
       wx.hideLoading()
-      wx.showToast({ title: '绑定成功', icon: 'success' })
+      wx.showToast({ title: '绑定成功', icon: 'success', duration: 1500 })
 
-      // 清理扫描并关闭弹窗
-      this.cleanupScaleScan()
+      // 关闭弹窗（保留 suppress 标记 2 秒，避免 BLE 立即跳转称重页覆盖提示）
       this.setData({ showScaleScanningDialog: false })
 
       // 刷新设备列表
       const app = getApp()
-      app.globalData.cachedDashboardData = null
-      app.globalData.dashboardCacheTime = 0
+      app.clearDashboardCache()
       await this.loadUserDevices()
+
+      // 2 秒后释放 BLE 自动跳转锁
+      setTimeout(() => {
+        app.globalData.suppressScaleAutoNavigate = false
+      }, 2000)
     } catch (err) {
       wx.hideLoading()
       const errData = err && err.data
@@ -636,13 +648,15 @@ Page({
     }
   },
 
-  // 关闭扫描弹窗
+  // 关闭扫描弹窗（恢复自动跳转）
   closeScaleScanDialog() {
     this.cleanupScaleScan()
+    const app = getApp()
+    app.globalData.suppressScaleAutoNavigate = false
     this.setData({ showScaleScanningDialog: false })
   },
 
-  // 清理扫描资源
+  // 清理扫描资源（不恢复自动跳转，由 confirmBindScale 延迟控制）
   cleanupScaleScan() {
     if (this._discoveryUnsub) {
       this._discoveryUnsub()
@@ -652,9 +666,6 @@ Page({
       clearTimeout(this._scanTimeout)
       this._scanTimeout = null
     }
-    // 恢复自动跳转
-    const app = getApp()
-    app.globalData.suppressScaleAutoNavigate = false
   },
 
   // 阻止事件冒泡
@@ -727,10 +738,9 @@ Page({
       wx.hideLoading()
       wx.showToast({ title: '删除成功', icon: 'success' })
 
-      // 【修复】清除 app 层 dashboard 缓存，确保删除后立即刷新
+      // 清除 dashboard 缓存及在途请求，确保删除后立即刷新
       const app = getApp();
-      app.globalData.cachedDashboardData = null
-      app.globalData.dashboardCacheTime = 0
+      app.clearDashboardCache()
       
       // 刷新设备列表
       await this.loadUserDevices()
@@ -844,17 +854,17 @@ Page({
   },
   
   onUnload() {
-    // 页面卸载时清除定时器
     if (this.deviceStatusTimer) {
       clearInterval(this.deviceStatusTimer);
       this.deviceStatusTimer = null;
     }
 
-    // 清理体脂秤绑定扫描
+    // 清理体脂秤绑定扫描 + 恢复自动跳转
     this.cleanupScaleScan()
+    const app = getApp()
+    app.globalData.suppressScaleAutoNavigate = false
 
     // 注意：不在这里停止蓝牙扫描
-    // 保持扫描运行，供其他页面使用
   },
   
   // 下拉刷新
@@ -867,15 +877,8 @@ Page({
     }
     
     try {
-      // 重新加载设备数据（用户主动刷新）
+      // 重新加载设备数据（用户主动刷新，BLE 条件启动已集成在 loadUserDevices 内）
       await this.loadUserDevices()
-      
-      // 如果网络恢复，尝试初始化蓝牙
-      const app = getApp()
-      if (app && !app.globalData.bleAdapterInitialized && !app.globalData.bluetoothInitializing) {
-        console.log('[首页] 🔄 下拉刷新成功，尝试初始化蓝牙')
-        app.checkAndInitBluetooth(this.data.userInfo.user_id)
-      }
       
       wx.showToast({
         title: '刷新成功',

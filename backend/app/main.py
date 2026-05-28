@@ -8,8 +8,7 @@ logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+# StaticFiles / FileResponse 已移除（静态页面废弃）
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlmodel import Session, select
@@ -307,6 +306,25 @@ async def lifespan(app: FastAPI):
                     # 刷新 DeviceCache（token 已更新）
                     await device_cache.invalidate_user(uid)
 
+                    # 刷新 DeviceCache 后重新获取 device_platforms
+                    user_platforms = await device_cache.get_user_platforms(uid)
+                    # 构建设备平台列表（自有设备）
+                    device_platforms = [
+                        {'platform': p, 'device_name': r.device_name, 'device_key': r.device_key,
+                         'is_ble': r.is_ble, 'is_complete': r.is_complete}
+                        for p, r in user_platforms.items()
+                    ]
+                    # 【修复】补充共享设备平台（SharedDeviceConfig 不在 DeviceCache 中）
+                    existing_plats = {p['platform'] for p in device_platforms}
+                    for plat_name in (shared_creds or {}):
+                        if plat_name not in existing_plats:
+                            device_platforms.append({
+                                'platform': plat_name,
+                                'device_name': f'shared_{plat_name}',
+                                'device_key': f'{plat_name}_shared',
+                                'is_ble': False,
+                                'is_complete': True,
+                            })
                     dashboard_data = {
                         'petkit_devices': petkit_devices,
                         'litterbox_stats': {},
@@ -314,6 +332,10 @@ async def lifespan(app: FastAPI):
                         'cloudpets_plans': plans,
                         'scale_stats': scale_stats,
                         'has_shared_devices': any(p in (shared_creds or {}) for p in ['petkit', 'cloudpets']),
+                        'device_platforms': device_platforms,
+                        'xiaomi_config': any(
+                            r.is_ble and r.is_complete for r in user_platforms.values()
+                        ),
                     }
                     await cache_manager.set(f'{cache_prefix}_dashboard_combined_data', dashboard_data, ttl=120)
                     logger.info(f"✓ Cache refreshed for user {uid}")
@@ -330,8 +352,7 @@ async def lifespan(app: FastAPI):
     await scheduler.add_task('dashboard_cache_refresh', refresh_dashboard_cache, interval=90, immediate=False)
     await scheduler.start()
 
-    # 启动缓存后台定期清理（惰性过期 + LRU 淘汰）
-    cache_manager.start_background_cleanup()
+    # CacheManager 为惰性过期，无需后台清理
 
     logger.info(f"=== App initialized in {time.time() - start_time:.2f}s ===")
 
@@ -340,7 +361,6 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
     await scheduler.stop()
-    await cache_manager.stop_background_cleanup()
     if state.petkit:
         await state.petkit.close()
     if state.cloudpets:
@@ -349,14 +369,6 @@ async def lifespan(app: FastAPI):
 # --- App Config ---
 app = FastAPI(title="Smart Home Controller", version="0.3.0", lifespan=lifespan)
 app.include_router(share_router)
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(os.path.dirname(BASE_DIR), "static")
-
-if os.path.exists(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-else:
-    logger.warning(f"Static directory not found: {STATIC_DIR}")
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
@@ -369,7 +381,8 @@ def get_petkit():
 
 # --- 公共服务获取工具（消除重复代码） ---
 async def _get_user_credentials(user_id: int, platform: str):
-    """获取用户指定平台的账号密码，返回 (account, password) 或 (None, None)"""
+    """获取用户指定平台的账号密码，返回 (account, password) 或 (None, None)
+    【修复】自有凭据不足时回退到 SharedDeviceConfig 共享凭据"""
     from .utils.config_manager import get_configs_batch
     configs = await get_configs_batch([
         ("account", user_id, platform),
@@ -377,6 +390,16 @@ async def _get_user_credentials(user_id: int, platform: str):
     ])
     account = configs.get(f"account_{user_id}_{platform}")
     password = configs.get(f"password_{user_id}_{platform}")
+
+    if account and password:
+        return account, password
+
+    # 【修复】共享凭据回退
+    shared_creds = await _get_shared_platform_credentials(user_id)
+    if platform in shared_creds:
+        logger.info(f"[Credentials] 用户 {user_id} 使用共享的 {platform} 凭据")
+        return shared_creds[platform]["account"], shared_creds[platform]["password"]
+
     return account, password
 
 
@@ -396,13 +419,19 @@ async def _get_petkit_for_user(user_id: int):
 
 async def _get_cloudpets_for_user(user_id: int):
     """获取 CloudPets 服务实例（优先复用全局，否则创建临时）
+    【修复】获取凭据时回退到共享凭据
     返回 (service, is_temp) 元组
     """
     if state.cloudpets and getattr(state.cloudpets, 'user_id', None) == user_id:
         return state.cloudpets, False
+
+    account, password = await _get_user_credentials(user_id, "cloudpets")
+    if not account or not password:
+        return None, False
+
     import backend.app.services.cloudpets_service as cp_module
     temp = cp_module.CloudPetsService(user_id=user_id)
-    await temp.initialize()
+    await temp.initialize(account=account, password=password)
     return temp, True
 
 
@@ -414,28 +443,7 @@ async def _release_service(service, is_temp):
         except Exception:
             pass
 
-# --- Static Routes ---
-@app.get("/")
-async def root():
-    return FileResponse(os.path.join(STATIC_DIR, 'index.html'))
-
-@app.get("/litterbox")
-async def litterbox_page():
-    return FileResponse(os.path.join(STATIC_DIR, 'litterbox.html'))
-
-@app.get("/feeder")
-async def feeder_page():
-    return FileResponse(os.path.join(STATIC_DIR, 'feeder.html'))
-
-@app.get("/feeder/plans")
-async def feeder_plans_page():
-    return FileResponse(os.path.join(STATIC_DIR, 'feeder_plans.html'))
-
-@app.get("/scale")
-async def scale_page():
-    return FileResponse(os.path.join(STATIC_DIR, 'scale.html'))
-
-# /api/config 页面已移除
+# 静态页面路由已全部移除（前端使用微信小程序原生页面）
 # --- Cache & Dashboard APIs ---
 @app.get("/api/cache/status")
 async def cache_status():
@@ -616,7 +624,7 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
 
         dashboard_data = {}
 
-        # 设备平台列表（供前端渲染设备卡片）
+        # 设备平台列表（供前端渲染设备卡片）— 从 DeviceCache 获取自有设备
         dashboard_data['device_platforms'] = [
             {
                 'platform': p,
@@ -627,6 +635,18 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
             }
             for p, r in user_platforms.items()
         ]
+
+        # 【修复】将共享设备平台也注入 device_platforms（SharedDeviceConfig 不在 DeviceCache 中）
+        existing_platforms = {p['platform'] for p in dashboard_data['device_platforms']}
+        for platform_name in shared_creds:
+            if platform_name not in existing_platforms:
+                dashboard_data['device_platforms'].append({
+                    'platform': platform_name,
+                    'device_name': f'shared_{platform_name}',
+                    'device_key': f'{platform_name}_shared',
+                    'is_ble': False,
+                    'is_complete': True,
+                })
 
         dashboard_data['has_shared_devices'] = len(shared_creds) > 0
 
@@ -844,9 +864,7 @@ async def petkit_daily_stats(device_id: Optional[str] = None, user_id: Optional[
             if not user_id:
                 raise HTTPException(status_code=503, detail="PetKit service not configured")
 
-        from .utils.config_manager import get_config_from_db
-        username = await get_config_from_db("account", user_id=user_id, platform="petkit")
-        password = await get_config_from_db("password", user_id=user_id, platform="petkit")
+        username, password = await _get_user_credentials(user_id, "petkit")
 
         if not username or not password:
             raise HTTPException(status_code=503, detail="PetKit credentials missing")
@@ -888,9 +906,7 @@ async def petkit_history_stats(device_id: Optional[str] = None, days: int = 7, u
             if not user_id:
                 raise HTTPException(status_code=503, detail="PetKit service not configured")
 
-        from .utils.config_manager import get_config_from_db
-        username = await get_config_from_db("account", user_id=user_id, platform="petkit")
-        password = await get_config_from_db("password", user_id=user_id, platform="petkit")
+        username, password = await _get_user_credentials(user_id, "petkit")
 
         if not username or not password:
             raise HTTPException(status_code=503, detail="PetKit credentials missing")
@@ -929,9 +945,7 @@ async def petkit_devices_with_stats(user_id: Optional[int] = None):
             return cached_data
 
         # Initialize service for this user if needed
-        from .utils.config_manager import get_config_from_db
-        username = await get_config_from_db("account", user_id=user_id, platform="petkit")
-        password = await get_config_from_db("password", user_id=user_id, platform="petkit")
+        username, password = await _get_user_credentials(user_id, "petkit")
 
         if not username or not password:
             raise HTTPException(status_code=503, detail="PetKit credentials missing")
@@ -1652,7 +1666,7 @@ async def bind_scale_device(request: ScaleBindRequest, user_id: str):
         logger.info(f"体脂秤绑定成功: user={uid}, device={ble_device_id}, name={ble_device_name}")
 
         return ScaleBindResponse(
-            device_key=f"xiaomi_{final_device_name}",
+            device_key=f"xiaomi_{ble_device_name}",
             device_id=ble_device_id,
             device_name=ble_device_name,
             status="active",

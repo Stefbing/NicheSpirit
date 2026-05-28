@@ -12,7 +12,6 @@ import re
 from sqlmodel import Session, select
 from ..models.db import engine
 from ..models.models import SystemConfig
-from ..utils.session_cache import SessionCache
 from typing import Optional, Dict, Any, List
 
 logging.basicConfig(level=logging.INFO)
@@ -42,9 +41,8 @@ class PetKitService:
         self._devices_refresh_lock = asyncio.Lock()
         self._ssl_context = None
         self._initialized = False
-        # 二级缓存：内存层
+        # 内存层 session 缓存
         self._memory_session: Optional[dict] = None
-        self._session_cache = SessionCache("petkit", "session_data", ttl=30*60)
 
         # 延迟初始化，避免在 __init__ 中执行阻塞操作
         if not self.username or not self.password:
