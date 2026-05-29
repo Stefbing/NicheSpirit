@@ -71,6 +71,15 @@ class PetKitService:
             logger.error(f"Failed to create SSL context: {e}")
             self._ssl_context = False
 
+    async def _save_disable_ssl_config(self):
+        """【修复】SSL降级成功后持久化到DB，避免下次启动重试"""
+        try:
+            from ..utils.config_manager import set_config_to_db
+            await set_config_to_db("PETKIT_DISABLE_SSL_VERIFY", user_id=0, value="true", platform="petkit")
+            logger.info("Persisted PETKIT_DISABLE_SSL_VERIFY=true to DB (won't retry SSL on next startup)")
+        except Exception as e:
+            logger.warning(f"Failed to persist SSL config: {e}")
+
     async def initialize(self):
         """Initialize service: load session from DB, or login if missing"""
         if self._initialized:
@@ -136,7 +145,19 @@ class PetKitService:
             config_value = await loop.run_in_executor(None, _load)
 
             if config_value:
-                session_data = json.loads(config_value)
+                # 【修复】校验 JSON 格式，防止空值或非法数据崩溃
+                if not config_value.strip() or config_value.strip() in ('null', 'None', ''):
+                    logger.warning("PetKit session data in DB is empty/invalid, need re-login")
+                    self._memory_session = None
+                    return False
+
+                try:
+                    session_data = json.loads(config_value)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"PetKit session JSON parse failed: {e}, will re-login")
+                    self._memory_session = None
+                    return False
+
                 saved_time = session_data.get('timestamp', 0)
                 current_time = int(time.time() * 1000)
 
@@ -330,6 +351,8 @@ class PetKitService:
                     await self.client.get_devices_data()
                     logger.warning("PetKit login successful (SSL verification disabled - development only)")
                     self._devices_last_refresh = time.time()
+                    # 【修复】SSL降级成功后持久化到DB，下次启动不再重试
+                    await self._save_disable_ssl_config()
                     await self._save_session_to_db()
                     self._initialized = True
                     return True

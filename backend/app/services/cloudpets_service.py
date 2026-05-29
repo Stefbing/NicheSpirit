@@ -89,14 +89,19 @@ class CloudPetsService:
         # Try to load existing token from database
         if await self._load_token_from_db():
             logger.info("CloudPets token loaded from DB")
-            # 【修复】即使从DB加载了token，也保存account/password供401重登使用
+            # 【修复】优先使用传入的凭据（共享凭据场景），回退到 DB 查询自有凭据
             if not self.account or not self.password:
-                acct = await self._get_config("account", user_id=uid)
-                pwd = await self._get_config("password", user_id=uid)
-                if acct and pwd:
-                    self.account = self._normalize_account(acct)
-                    self.password = pwd
-                    logger.info("[401 Fix] 已保存 account/password 供重登使用")
+                if account and password:
+                    self.account = self._normalize_account(account)
+                    self.password = password
+                    logger.info("[401 Fix] 已保存传入的 account/password 供重登使用")
+                else:
+                    acct = await self._get_config("account", user_id=uid)
+                    pwd = await self._get_config("password", user_id=uid)
+                    if acct and pwd:
+                        self.account = self._normalize_account(acct)
+                        self.password = pwd
+                        logger.info("[401 Fix] 已保存 DB 中的 account/password 供重登使用")
             return True
         
         # 凭据来源：优先参数传入，其次 DB 查询
@@ -109,7 +114,7 @@ class CloudPetsService:
             return False
         
         # Save credentials for retry login
-        self.account = account
+        self.account = self._normalize_account(account)
         self.password = password
         
         # Process account (remove 86- prefix)
@@ -239,13 +244,18 @@ class CloudPetsService:
                 "pwd": password,
                 "userType": "1"
             }
-            # Login endpoint might need clean headers without old auth
+            # Login endpoint needs clean headers without old auth
+            # 【修复】必须移除过期 authorization，否则 CloudPets 可能拒绝登录请求
             login_headers = {
                 "Content-Type": "application/x-www-form-urlencoded",
                 "lang": "zh_CN",
                 "platform": "Android",
                 "x-cp-client": "1"
             }
+            # 移除旧的 authorization header，避免干扰登录请求
+            had_auth = "authorization" in self.client.headers
+            old_auth = self.client.headers.pop("authorization", None)
+            logger.debug(f"Temporarily removed authorization header for login (had_auth={had_auth})")
 
             resp = await self.client.post("/app/terminal/user/login", data=payload, headers=login_headers)
             resp.raise_for_status()

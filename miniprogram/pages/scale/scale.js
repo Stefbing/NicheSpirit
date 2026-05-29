@@ -1,6 +1,9 @@
 const cloudRequest = require('../../utils/cloud_request.js');
 const BLEUtils = require('../../utils/ble_scale.js');
 
+// 成员加载 Promise（解决竞态条件：蓝牙数据早于成员加载到达）
+let _membersLoadPromise = null;
+
 // ======================
 // 简化状态机（3个状态）
 // ======================
@@ -132,7 +135,7 @@ Page({
     this.unsubscribe = getApp().subscribeScaleData(this.handleScaleData.bind(this));
 
     // 加载成员数据（优先使用全局预加载的）
-    this.loadMembers();
+    _membersLoadPromise = this.loadMembers();
   },
 
   onShow() {
@@ -209,6 +212,9 @@ Page({
       this.unsubscribe();
       this.unsubscribe = null;
     }
+
+    // 清理成员加载 Promise，防止下次进入使用旧的 Promise
+    _membersLoadPromise = null;
   },
 
   // ======================
@@ -671,32 +677,42 @@ Page({
   // ======================
   // 自动匹配成员
   // ======================
-  autoMatchMember(weight) {
-    return new Promise((resolve) => {
-      if (!this.data.members || this.data.members.length === 0) {
-        // 无成员，弹出创建
-        this.showCreateMemberModal(weight);
-        resolve(false);
-        return;
+  async autoMatchMember(weight) {
+    // 【修复竞态】如果成员还没加载完成（蓝牙数据先于成员数据到达），等待加载
+    if (!this.data.members || this.data.members.length === 0) {
+      if (_membersLoadPromise) {
+        console.log('[Scale] ⏳ 成员数据尚未加载，等待加载完成...');
+        const timeoutPromise = new Promise(resolve => setTimeout(resolve, 5000));
+        await Promise.race([_membersLoadPromise, timeoutPromise]);
+        console.log('[Scale] ⏳ 成员数据等待结束，当前 members.length:', this.data.members ? this.data.members.length : 0);
       }
+    }
 
-      // 查找所有在容差范围内的成员
-      const candidates = [];
-      this.data.members.forEach(member => {
-        if (!member.last_weight) return;
+    // 再次检查（可能已加载成功，也可能超时）
+    if (!this.data.members || this.data.members.length === 0) {
+      // 无成员，弹出创建
+      this.showCreateMemberModal(weight);
+      return false;
+    }
 
-        const diff = Math.abs(member.last_weight - weight);
-        if (diff < CONFIG.MATCH_TOLERANCE) {
-          candidates.push({ member, diff });
-        }
-      });
+    // 查找所有在容差范围内的成员
+    const candidates = [];
+    this.data.members.forEach(member => {
+      if (!member.last_weight) return;
 
-      if (candidates.length === 0) {
-        // 无匹配
-        if (this.data.members.length === 1) {
-          // 【优化】仅有一个成员时，自动匹配，不弹创建窗口
-          const onlyMember = this.data.members[0];
-          console.log('[Scale] ✅ 仅一个成员，自动匹配:', onlyMember.name, `体重 ${weight}kg`);
+      const diff = Math.abs(member.last_weight - weight);
+      if (diff < CONFIG.MATCH_TOLERANCE) {
+        candidates.push({ member, diff });
+      }
+    });
+
+    if (candidates.length === 0) {
+      // 无匹配
+      if (this.data.members.length === 1) {
+        // 【优化】仅有一个成员时，自动匹配，不弹创建窗口
+        const onlyMember = this.data.members[0];
+        console.log('[Scale] ✅ 仅一个成员，自动匹配:', onlyMember.name, `体重 ${weight}kg`);
+        return new Promise((resolve) => {
           this.setData({
             matchedMember: onlyMember,
             selectedMemberId: onlyMember.id,
@@ -705,24 +721,22 @@ Page({
               age: onlyMember.age,
               gender: onlyMember.gender
             }
-          }, () => {
-            resolve(true);
-          });
-        } else {
-          this.showCreateMemberModal(weight);
-          resolve(false);
-          return;
-        }
-        return;
+          }, () => { resolve(true); });
+        });
+      } else {
+        this.showCreateMemberModal(weight);
+        return false;
       }
+    }
 
-      // 按体重差异排序
-      candidates.sort((a, b) => a.diff - b.diff);
+    // 按体重差异排序
+    candidates.sort((a, b) => a.diff - b.diff);
 
-      // 如果只有一个候选或差异明显，直接选择
-      if (candidates.length === 1 || (candidates[1].diff - candidates[0].diff > 2)) {
-        const bestMatch = candidates[0].member;
+    // 如果只有一个候选或差异明显，直接选择
+    if (candidates.length === 1 || (candidates[1].diff - candidates[0].diff > 2)) {
+      const bestMatch = candidates[0].member;
 
+      return new Promise((resolve) => {
         this.setData({
           matchedMember: bestMatch,
           selectedMemberId: bestMatch.id,
@@ -735,11 +749,13 @@ Page({
           console.log('[Scale] ✅ 自动匹配成员:', bestMatch.name, '差异:', candidates[0].diff.toFixed(2), 'kg');
           resolve(true);
         });
-      } else {
-        // 多个候选且差异小，选择最近的成员
-        const bestMatch = candidates[0].member;
-        console.log('[Scale] ⚠️ 多个候选成员，自动选择最近:', bestMatch.name);
+      });
+    } else {
+      // 多个候选且差异小，选择最近的成员
+      const bestMatch = candidates[0].member;
+      console.log('[Scale] ⚠️ 多个候选成员，自动选择最近:', bestMatch.name);
 
+      return new Promise((resolve) => {
         this.setData({
           matchedMember: bestMatch,
           selectedMemberId: bestMatch.id,
@@ -748,11 +764,9 @@ Page({
             age: bestMatch.age,
             gender: bestMatch.gender
           }
-        }, () => {
-          resolve(true);
-        });
-      }
-    });
+        }, () => { resolve(true); });
+      });
+    }
   },
 
   // ======================

@@ -273,9 +273,12 @@ async def _get_user_credentials(user_id: int, platform: str):
     # 【修复】共享凭据回退
     shared_creds = await _get_shared_platform_credentials(user_id)
     if platform in shared_creds:
-        logger.info(f"[Credentials] 用户 {user_id} 使用共享的 {platform} 凭据")
-        return shared_creds[platform]["account"], shared_creds[platform]["password"]
+        acct = shared_creds[platform].get("account", "")
+        pwd = shared_creds[platform].get("password", "")
+        logger.info(f"[Credentials] 用户 {user_id} 使用共享的 {platform} 凭据: acct={acct[:4]}***")
+        return acct, pwd
 
+    logger.warning(f"[Credentials] 用户 {user_id} 的 {platform} 凭据全部不可用（自有空+共享无）")
     return account, password
 
 
@@ -296,16 +299,37 @@ async def _get_petkit_for_user(user_id: int):
 async def _get_cloudpets_for_user(user_id: int):
     """获取 CloudPets 服务实例（优先复用全局，否则创建临时）
     【修复】获取凭据时回退到共享凭据
+    【修复】全局实例 user_id=None 时自动适配实际用户，避免每次都创建临时实例
     返回 (service, is_temp) 元组
     """
+    # 尝试复用全局实例（user_id 匹配时）
     if state.cloudpets and getattr(state.cloudpets, 'user_id', None) == user_id:
         return state.cloudpets, False
 
     account, password = await _get_user_credentials(user_id, "cloudpets")
     if not account or not password:
+        logger.warning(f'[CP_Svc] user={user_id} 凭据为空，无法初始化服务')
         return None, False
 
     import backend.app.services.cloudpets_service as cp_module
+
+    # 如果全局实例存在但没有 user_id，重新初始化并复用
+    # 这样 _memory_token 可以跨请求缓存，避免每次重新加载DB
+    if state.cloudpets and state.cloudpets.user_id is None:
+        async with state.cloudpets_lock:
+            if state.cloudpets and state.cloudpets.user_id is None:
+                state.cloudpets.user_id = user_id
+                state.cloudpets.account = account
+                state.cloudpets.password = password
+                # 清除旧的缓存（可能来自 user_id=0 的凭据）
+                state.cloudpets._memory_token = None
+                state.cloudpets.client.headers.pop("authorization", None)
+                # 以新 user_id 重新加载/登录
+                await state.cloudpets.initialize(account=account, password=password)
+                logger.info(f'[CP_Svc] 全局实例已适配 user={user_id}')
+                return state.cloudpets, False
+
+    logger.info(f'[CP_Svc] user={user_id} 使用凭据初始化临时服务: acct={account[:4] if account else "?"}***')
     temp = cp_module.CloudPetsService(user_id=user_id)
     await temp.initialize(account=account, password=password)
     return temp, True
@@ -495,7 +519,7 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
                     'device_name': f'shared_{platform_name}',
                     'device_key': f'{platform_name}_shared',
                     'is_ble': is_ble,
-                    'is_complete': not is_ble,  # BLE 设备在 B 处无法连接，标记为不完整
+                    'is_complete': True,  # 【修复】共享的体脂秤也标记为完整，让前端显示共享设备卡片
                     'is_shared': True,
                 })
 
@@ -508,6 +532,32 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
             if rec and not rec.is_complete and not rec.is_ble:
                 logger.info(f'[Dashboard] 清理 user={user_id} 的不完整 {platform_name} 残留配置')
                 await device_cache.invalidate_platform(user_id, platform_name)
+                # 【修复】同时从已组装的 device_platforms 中移除
+                dashboard_data['device_platforms'] = [
+                    p for p in dashboard_data.get('device_platforms', [])
+                    if not (p['platform'] == platform_name and not p['is_complete'])
+                ]
+                # 【修复】同时删除 DB 中的残留 token，防止下次启动时重载过期 token 重登失败
+                def _cleanup_db():
+                    from .models.models import SystemConfig
+                    from .models.db import engine
+                    from sqlmodel import Session, select
+                    with Session(engine) as s:
+                        stmt = select(SystemConfig).where(
+                            SystemConfig.user_id == user_id,
+                            SystemConfig.platform == platform_name,
+                            SystemConfig.is_active == True
+                        )
+                        rows = s.exec(stmt).all()
+                        for row in rows:
+                            if row.key not in ('account', 'password'):
+                                row.is_active = False
+                                s.add(row)
+                        s.commit()
+                        return len(rows)
+                cleaned = await asyncio.get_running_loop().run_in_executor(None, _cleanup_db)
+                if cleaned:
+                    logger.info(f'[Dashboard] 已清理 DB 中 user={user_id} 的 {platform_name} 残留记录')
 
         # 并行获取PetKit设备和CloudPets数据
         async def fetch_petkit_devices():
@@ -554,7 +604,8 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
             else:
                 import backend.app.services.cloudpets_service as cp_module
                 temp_service = cp_module.CloudPetsService(user_id=user_id)
-                await temp_service.initialize()
+                # 【修复】必须传入 cloudpets_account/password（共享凭据场景）
+                await temp_service.initialize(account=cloudpets_account, password=cloudpets_password)
                 servings = await temp_service.get_servings_today()
                 plans = await temp_service.get_feeding_plans()
                 mem_token = getattr(temp_service, '_memory_token', None)
@@ -564,6 +615,11 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
                     await update_cloud_device_token(user_id, 'cloudpets', mem_token, cloudpets_rec.device_name)
                 await temp_service.close()
 
+            # 【修复】过滤 CloudPets API 错误响应（如 401），不传给前端
+            if isinstance(servings, dict) and servings.get('code') == 401:
+                servings = {}
+            if not isinstance(plans, list) or (isinstance(plans, dict) and plans.get('code') == 401):
+                plans = []
             result["servings"] = servings or {}
             result["plans"] = plans or []
             return result
@@ -591,8 +647,8 @@ async def get_dashboard_data(user_id: Optional[int] = None, session: Session = D
         from .utils.device_cache import device_cache as _dc
         await _dc.invalidate_user(user_id)
 
-        # 体脂秤配置（来自缓存记录）
-        dashboard_data['xiaomi_config'] = xiaomi_rec is not None and xiaomi_rec.is_complete if xiaomi_rec else False
+        # 体脂秤配置（来自缓存记录 或 共享设备）
+        dashboard_data['xiaomi_config'] = (xiaomi_rec is not None and xiaomi_rec.is_complete) if xiaomi_rec else ('xiaomi' in shared_creds)
 
         # 获取体脂秤统计数据
         try:
@@ -869,7 +925,11 @@ async def cloudpets_servings_today(user_id: Optional[int] = None):
         finally:
             await _release_service(service, is_temp)
 
-        await cache_manager.set(cache_key, result, ttl=120)
+        # 【修复】不缓存错误响应（如 business logic 401），避免缓存污染
+        if isinstance(result, dict) and str(result.get("code")) in ("401", "500", "403"):
+            logger.warning(f"[Cache] 跳过缓存 CloudPets 错误响应: code={result.get('code')}, msg={result.get('message')}")
+        else:
+            await cache_manager.set(cache_key, result, ttl=120)
         return result
     except Exception as e:
         logger.error(f"Failed to get servings: {e}")
@@ -920,7 +980,15 @@ async def cloudpets_get_plans(user_id: Optional[int] = None):
         finally:
             await _release_service(service, is_temp)
 
-        await cache_manager.set(cache_key, plans, ttl=300)
+        # 【修复】不缓存空列表结果（可能来自401错误响应的退化处理）
+        # 仅当 plans 非空且无错误时缓存
+        if isinstance(plans, list) and len(plans) > 0:
+            await cache_manager.set(cache_key, plans, ttl=300)
+        elif isinstance(plans, dict) and str(plans.get("code")) in ("401", "500", "403"):
+            logger.warning(f"[Cache] 跳过缓存 CloudPets 计划错误响应: code={plans.get('code')}")
+        else:
+            # 空结果仅缓存较短时间，避免内容为空时长时间无刷新
+            await cache_manager.set(cache_key, plans, ttl=60)
         return plans
     except Exception as e:
         logger.error(f"Failed to get plans: {e}")
