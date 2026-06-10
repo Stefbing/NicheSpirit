@@ -11,17 +11,22 @@ Page({
     showAddPlanDialog: false, // 显示添加计划弹窗
     planTime: '', // 计划时间
     planAmount: 1, // 计划份量
-    planAmountIndex: 0 // 计划份量索引
+    planAmountIndex: 0, // 计划份量索引
+    _onLoadCalled: false // 【修复】防重标记，阻止 onLoad + onShow 重复调用
   },
 
   onLoad() {
+    this.setData({ _onLoadCalled: true });
     this.fetchPlans();
     this.fetchTodayServings();
   },
 
   onShow() {
-    // 页面显示时刷新数据
-    this.fetchTodayServings();
+    // 【修复】首次打开页面时，onLoad 和 onShow 连续触发，
+    // 如果 onLoad 已调用过 fetchTodayServings，onShow 不再重复请求
+    if (!this.data._onLoadCalled) {
+      this.fetchTodayServings();
+    }
     // 隐藏右上角"..."菜单的分享功能，统一使用页内分享入口
     wx.hideShareMenu({ menus: ['share', 'shareTimeline'] });
   },

@@ -1,12 +1,12 @@
 """
 设备缓存管理器 - 启动时加载所有设备配置，按 user_id+platform 分组缓存
-生命周期：系统启动 → load_all()，设备增删 → invalidate_user()
+生命周期：系统启动 -> load_all()，设备增删 -> invalidate_user()
+所有缓存数据存储在 Redis 中，无内存缓存
 """
 import logging
-import time
 import asyncio
 from typing import Optional, Dict, List, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from sqlmodel import Session, select
 from ..models.db import engine
 from ..models.models import SystemConfig
@@ -24,17 +24,16 @@ BLE_REQUIRED_KEYS = {'ble_address'}
 class DeviceRecord:
     """单个设备平台的完整记录"""
     platform: str
-    device_name: str          # 真实设备名（如"小佩智能全自动猫厕所 MAX2"）
-    is_ble: bool = False       # 是否为本地蓝牙设备
+    device_name: str
+    is_ble: bool = False
     account: str = ''
     password: str = ''
     token: str = ''
     ble_address: str = ''
-    is_complete: bool = False  # 是否包含该平台所需的所有 key
+    is_complete: bool = False
 
     @property
     def device_key(self) -> str:
-        """设备标识符：platform_device_name（用于删除等操作）"""
         return f"{self.platform}_{self.device_name}"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -52,17 +51,19 @@ class DeviceRecord:
 
 
 class DeviceCacheManager:
-    """设备缓存管理器（纯内存+惰性过期）"""
+    """设备缓存管理器（Redis 持久化）"""
+
+    DEVICE_CACHE_KEY = "device_cache:all"
 
     def __init__(self):
-        # { user_id: { platform: DeviceRecord } }
-        self._devices: Dict[int, Dict[str, DeviceRecord]] = {}
         self._loaded = False
 
     # ==================== 加载 & 刷新 ====================
 
     async def load_all(self):
-        """系统启动时全量加载所有活跃设备"""
+        """系统启动时全量加载所有活跃设备到 Redis"""
+        from .redis_cache import redis_cache
+
         def _load():
             with Session(engine) as session:
                 return session.exec(
@@ -74,13 +75,15 @@ class DeviceCacheManager:
                 ).all()
 
         rows = await asyncio.get_running_loop().run_in_executor(None, _load)
-        self._build_cache(rows)
+        data = self._build_cache(rows)
+        await redis_cache.set(self.DEVICE_CACHE_KEY, data, ttl=86400)
         self._loaded = True
-        total = sum(len(plats) for plats in self._devices.values())
-        logger.info(f"[DeviceCache] 启动加载完成: {len(self._devices)} 用户, {total} 设备平台")
+        total = sum(len(plats) for plats in data.values())
+        logger.info(f"[DeviceCache] 启动加载完成: {len(data)} 用户, {total} 设备平台")
 
-    def _build_cache(self, rows: List[SystemConfig]):
-        """将数据库行重建为缓存结构"""
+    @staticmethod
+    def _build_cache(rows: List[SystemConfig]) -> dict:
+        """将数据库行重建为可序列化的缓存结构（纯 dict，非 DeviceRecord）"""
         temp: Dict[int, Dict[str, dict]] = {}
         for row in rows:
             uid = row.user_id
@@ -93,7 +96,6 @@ class DeviceCacheManager:
                     'device_name': row.device_name or plat,
                     'keys': {},
                 }
-            # 解密凭据值后存入
             val = row.value
             if row.is_encrypted:
                 try:
@@ -102,50 +104,62 @@ class DeviceCacheManager:
                     val = ''
             temp[uid][plat]['keys'][row.key] = val
 
-        # 构建 DeviceRecord
-        result: Dict[int, Dict[str, DeviceRecord]] = {}
+        result: Dict[str, Dict[str, dict]] = {}
         for uid, plats in temp.items():
-            result[uid] = {}
+            uid_str = str(uid)
+            result[uid_str] = {}
             for plat, data in plats.items():
                 keys = data['keys']
                 is_ble = 'ble_address' in keys
                 required = BLE_REQUIRED_KEYS if is_ble else CLOUD_REQUIRED_KEYS
                 present = set(keys.keys())
-                rec = DeviceRecord(
-                    platform=plat,
-                    device_name=data['device_name'],
-                    is_ble=is_ble,
-                    account=keys.get('account', ''),
-                    password=keys.get('password', ''),
-                    token=keys.get('token', ''),
-                    ble_address=keys.get('ble_address', ''),
-                    is_complete=required.issubset(present),
-                )
-                result[uid][plat] = rec
-
-        self._devices = result
+                result[uid_str][plat] = {
+                    'platform': plat,
+                    'device_name': data['device_name'],
+                    'is_ble': is_ble,
+                    'account': keys.get('account', ''),
+                    'password': keys.get('password', ''),
+                    'token': keys.get('token', ''),
+                    'ble_address': keys.get('ble_address', ''),
+                    'is_complete': required.issubset(present),
+                }
+        return result
 
     # ==================== 查询接口 ====================
 
-    async def get_user_platforms(self, user_id: int) -> Dict[str, DeviceRecord]:
+    async def get_user_platforms(self, user_id: int) -> Dict[str, 'DeviceRecord']:
         """
         获取用户的设备平台映射。
-        若缓存未加载或该用户平台不完整，回退查 DB 并更新缓存。
+        首次调用或缓存失效时从 DB 重建。
         """
-        # 缓存未加载时尝试从 DB 加载
-        if not self._loaded:
+        from .redis_cache import redis_cache
+
+        data = await redis_cache.get(self.DEVICE_CACHE_KEY)
+        if data is None:
             await self.load_all()
+            data = await redis_cache.get(self.DEVICE_CACHE_KEY)
 
-        platforms = self._devices.get(user_id)
+        if data is None:
+            return {}
+
+        platforms = data.get(str(user_id))
         if platforms is None:
-            # 查 DB 确认
             await self._load_user_from_db(user_id)
-            platforms = self._devices.get(user_id, {})
+            data = await redis_cache.get(self.DEVICE_CACHE_KEY)
+            platforms = data.get(str(user_id), {}) if data else {}
 
-        return platforms
+        result: Dict[str, DeviceRecord] = {}
+        for plat, info in platforms.items():
+            if isinstance(info, dict):
+                result[plat] = DeviceRecord(**info)
+            else:
+                result[plat] = info
+        return result
 
     async def _load_user_from_db(self, user_id: int):
-        """从数据库加载单个用户的设备到缓存"""
+        """从数据库加载单个用户的设备到 Redis"""
+        from .redis_cache import redis_cache
+
         def _load():
             with Session(engine) as session:
                 return session.exec(
@@ -157,69 +171,47 @@ class DeviceCacheManager:
                 ).all()
 
         rows = await asyncio.get_running_loop().run_in_executor(None, _load)
+        existing = await redis_cache.get(self.DEVICE_CACHE_KEY) or {}
         if not rows:
-            self._devices[user_id] = {}
+            existing[str(user_id)] = {}
+            await redis_cache.set(self.DEVICE_CACHE_KEY, existing, ttl=86400)
             return
 
-        # 临时重建该用户的数据
-        temp: Dict[int, Dict[str, dict]] = {user_id: {}}
-        for row in rows:
-            plat = row.platform
-            if plat not in temp[user_id]:
-                temp[user_id][plat] = {
-                    'platform': plat,
-                    'device_name': row.device_name or plat,
-                    'keys': {},
-                }
-            val = row.value
-            if row.is_encrypted:
-                try:
-                    val = ConfigEncryptor.decrypt(val)
-                except Exception:
-                    val = ''
-            temp[user_id][plat]['keys'][row.key] = val
-
-        # 合并到全局缓存（覆盖该用户）
-        uid_data = temp[user_id]
-        result: Dict[str, DeviceRecord] = {}
-        for plat, data in uid_data.items():
-            keys = data['keys']
-            is_ble = 'ble_address' in keys
-            required = BLE_REQUIRED_KEYS if is_ble else CLOUD_REQUIRED_KEYS
-            present = set(keys.keys())
-            result[plat] = DeviceRecord(
-                platform=plat,
-                device_name=data['device_name'],
-                is_ble=is_ble,
-                account=keys.get('account', ''),
-                password=keys.get('password', ''),
-                token=keys.get('token', ''),
-                ble_address=keys.get('ble_address', ''),
-                is_complete=required.issubset(present),
-            )
-        self._devices[user_id] = result
+        new_user_data = self._build_cache(rows).get(str(user_id), {})
+        existing[str(user_id)] = new_user_data
+        await redis_cache.set(self.DEVICE_CACHE_KEY, existing, ttl=86400)
 
     # ==================== 缓存失效 ====================
 
     async def invalidate_user(self, user_id: int):
         """用户设备变更后清除缓存，下次查询时自动重载"""
-        self._devices.pop(user_id, None)
+        from .redis_cache import redis_cache
+        data = await redis_cache.get(self.DEVICE_CACHE_KEY)
+        if data:
+            data.pop(str(user_id), None)
+            await redis_cache.set(self.DEVICE_CACHE_KEY, data, ttl=86400)
 
     async def invalidate_platform(self, user_id: int, platform: str):
         """清除单个用户单个平台的缓存"""
-        if user_id in self._devices:
-            self._devices[user_id].pop(platform, None)
+        from .redis_cache import redis_cache
+        data = await redis_cache.get(self.DEVICE_CACHE_KEY)
+        if data and str(user_id) in data:
+            data[str(user_id)].pop(platform, None)
+            await redis_cache.set(self.DEVICE_CACHE_KEY, data, ttl=86400)
 
     async def invalidate_all(self):
-        """清空全部缓存（极少使用）"""
-        self._devices.clear()
+        """清空全部缓存"""
+        from .redis_cache import redis_cache
+        await redis_cache.delete(self.DEVICE_CACHE_KEY)
         self._loaded = False
 
     # ==================== 统计 ====================
 
-    def stats(self) -> Dict[str, Any]:
-        total_users = len(self._devices)
-        total_platforms = sum(len(p) for p in self._devices.values())
+    async def stats(self) -> Dict[str, Any]:
+        from .redis_cache import redis_cache
+        data = await redis_cache.get(self.DEVICE_CACHE_KEY) or {}
+        total_users = len(data)
+        total_platforms = sum(len(plats) for plats in data.values())
         return {
             'loaded': self._loaded,
             'users': total_users,

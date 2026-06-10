@@ -18,9 +18,10 @@ from .services.cloudpets_service import cloudpets_service, FeedingPlan as CloudP
 
 from .models.models import User, WeightRecord, SystemConfig, FamilyMember
 from .models.db import get_session, init_db, engine
-from .utils.cache_manager import cache_manager  # no-op 桩，所有 get/set 均为空操作
+from .utils.redis_cache import redis_cache
 from .utils.config_encryptor import ConfigEncryptor
 from .scheduler.task_scheduler import scheduler
+from .scheduler.data_sync import sync_petkit_data, sync_cloudpets_data
 from .share_routes import router as share_router
 
 load_dotenv()
@@ -73,7 +74,14 @@ async def _init_service_for_user(platform: str, user_id: int, account: str, pass
         return False
 
 async def _get_first_user_with_platform(platform: str) -> Optional[int]:
-    """Query first user ID with specified platform config"""
+    """Query first user ID with specified platform config (cached in Redis, 1h TTL)"""
+    from .utils.redis_cache import redis_cache
+    cache_key = f"first_user:platform:{platform}"
+
+    cached = await redis_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         from sqlmodel import Session, select
         from .models.models import SystemConfig
@@ -86,7 +94,9 @@ async def _get_first_user_with_platform(platform: str) -> Optional[int]:
                 ).distinct()
                 ids = session.exec(stmt).all()
                 return ids[0] if ids else None
-        return await loop.run_in_executor(None, _query)
+        result = await loop.run_in_executor(None, _query)
+        await redis_cache.set(cache_key, result, ttl=3600)
+        return result
     except Exception as e:
         logger.warning(f"Query {platform} user failed: {e}")
         return None
@@ -230,6 +240,14 @@ async def lifespan(app: FastAPI):
     await scheduler.add_task('expired_share_cleanup', cleanup_expired_shares, interval=300, immediate=True)
     await scheduler.start()
 
+    # ── 初始化 Redis 缓存（读写分离架构） ──
+    await redis_cache.connect()
+
+    # ── 注册后台数据同步任务（每 5 分钟同步第三方 API → Redis） ──
+    await scheduler.add_task('sync_petkit', sync_petkit_data, interval=300, immediate=True)
+    await scheduler.add_task('sync_cloudpets', sync_cloudpets_data, interval=300, immediate=True)
+    logger.info("✓ 数据同步任务已注册（PetKit + CloudPets, 每 5 分钟）")
+
     logger.info(f"=== App initialized in {time.time() - start_time:.2f}s ===")
 
     yield
@@ -241,6 +259,7 @@ async def lifespan(app: FastAPI):
         await state.petkit.close()
     if state.cloudpets:
         await state.cloudpets.close()
+    await redis_cache.close()
 
 # --- App Config ---
 app = FastAPI(title="Smart Home Controller", version="0.3.0", lifespan=lifespan)
@@ -314,15 +333,12 @@ async def _get_cloudpets_for_user(user_id: int):
     import backend.app.services.cloudpets_service as cp_module
 
     # 如果全局实例存在但没有 user_id，重新初始化并复用
-    # 这样 _memory_token 可以跨请求缓存，避免每次重新加载DB
     if state.cloudpets and state.cloudpets.user_id is None:
         async with state.cloudpets_lock:
             if state.cloudpets and state.cloudpets.user_id is None:
                 state.cloudpets.user_id = user_id
                 state.cloudpets.account = account
                 state.cloudpets.password = password
-                # 清除旧的缓存（可能来自 user_id=0 的凭据）
-                state.cloudpets._memory_token = None
                 state.cloudpets.client.headers.pop("authorization", None)
                 # 以新 user_id 重新加载/登录
                 await state.cloudpets.initialize(account=account, password=password)
@@ -453,250 +469,157 @@ async def _get_shared_platform_credentials(user_id: int) -> dict:
 
 @app.get("/api/dashboard/data")
 async def get_dashboard_data(user_id: Optional[int] = None, session: Session = Depends(get_session)):
-    """Get aggregated dashboard data (no cache, direct DB + live API)"""
+    """Get aggregated dashboard data — 仅读本地缓存/DB，不发起外网 HTTP 请求
+    【优化】V2 - 减少 DB 查询次数、裁剪响应载荷、使用 Redis 兜底
+    """
     try:
-        # 提前导入，避免作用域问题
-        from .utils.config_manager import get_config_from_db, get_configs_batch
-
-        # If no user_id provided, try to get from first configured user
         if not user_id:
             user_id = await _get_first_user_with_platform("cloudpets") or await _get_first_user_with_platform("petkit")
             if not user_id:
                 return {"petkit_devices": [], "litterbox_stats": {}, "cloudpets_servings": {}, "cloudpets_plans": []}
 
-        # 从 DeviceCache 获取该用户的设备平台配置
+        dashboard_data = {}
+
+        # ── 1. 设备平台列表（DeviceCache → Redis） ──
         from .utils.device_cache import device_cache
         user_platforms = await device_cache.get_user_platforms(user_id)
 
-        petkit_rec = user_platforms.get('petkit')
-        cloudpets_rec = user_platforms.get('cloudpets')
-        xiaomi_rec = user_platforms.get('xiaomi')
-
-        petkit_username = petkit_rec.account if petkit_rec and petkit_rec.is_complete else None
-        petkit_password = petkit_rec.password if petkit_rec and petkit_rec.is_complete else None
-        cloudpets_account = cloudpets_rec.account if cloudpets_rec and cloudpets_rec.is_complete else None
-        cloudpets_password = cloudpets_rec.password if cloudpets_rec and cloudpets_rec.is_complete else None
-
-        # 查询该用户接受的共享设备，补充没有自有配置的平台
-        shared_creds = await _get_shared_platform_credentials(user_id)
-        if 'petkit' in shared_creds and not petkit_username:
-            petkit_username = shared_creds['petkit']['account']
-            petkit_password = shared_creds['petkit']['password']
-            logger.info(f"[Dashboard] 用户 {user_id} 使用共享的 PetKit 凭证")
-        # 标记是否使用共享凭据（阻止 token 回写到接受者的 SystemConfig）
-        using_shared_petkit = 'petkit' in shared_creds and not petkit_rec
-        using_shared_cloudpets = 'cloudpets' in shared_creds and not cloudpets_rec
-
-        if 'cloudpets' in shared_creds and not cloudpets_account:
-            cloudpets_account = shared_creds['cloudpets']['account']
-            cloudpets_password = shared_creds['cloudpets']['password']
-            using_shared_cloudpets = True
-            logger.info(f"[Dashboard] 用户 {user_id} 使用共享的 CloudPets 凭证")
-
-        dashboard_data = {}
-
-        # 设备平台列表（供前端渲染设备卡片）— 从 DeviceCache 获取自有设备
         dashboard_data['device_platforms'] = [
             {
-                'platform': p,
-                'device_name': r.device_name,
-                'device_key': r.device_key,
-                'is_ble': r.is_ble,
-                'is_complete': r.is_complete,
-                'is_shared': False,
+                'platform': p, 'device_name': r.device_name,
+                'device_key': r.device_key, 'is_ble': r.is_ble,
+                'is_complete': r.is_complete, 'is_shared': False,
             }
             for p, r in user_platforms.items()
         ]
 
-        # 【修复】将共享设备平台也注入 device_platforms（SharedDeviceConfig 不在 DeviceCache 中）
-        # 只排除已有完整自有配置的平台，不完整条目（如残留的 token）不阻挡共享注入
-        existing_complete_platforms = {p['platform'] for p in dashboard_data['device_platforms'] if p['is_complete']}
+        # ── 2. 共享凭据（Redis 缓存 60s，共享变化不频繁） ──
+        shared_cache_key = f"shared_creds:user_{user_id}"
+        shared_creds = await redis_cache.get(shared_cache_key)
+        if shared_creds is None:
+            shared_creds = await _get_shared_platform_credentials(user_id)
+            await redis_cache.set(shared_cache_key, shared_creds, ttl=60)
+
+        existing_complete = {p['platform'] for p in dashboard_data['device_platforms'] if p['is_complete']}
+        need_device_invalidate = False
         for platform_name, cred_info in shared_creds.items():
-            if platform_name not in existing_complete_platforms:
+            if platform_name not in existing_complete:
                 is_ble = cred_info.get('_is_ble', False)
                 dashboard_data['device_platforms'].append({
-                    'platform': platform_name,
-                    'device_name': f'shared_{platform_name}',
-                    'device_key': f'{platform_name}_shared',
-                    'is_ble': is_ble,
-                    'is_complete': True,  # 【修复】共享的体脂秤也标记为完整，让前端显示共享设备卡片
-                    'is_shared': True,
+                    'platform': platform_name, 'device_name': f'shared_{platform_name}',
+                    'device_key': f'{platform_name}_shared', 'is_ble': is_ble,
+                    'is_complete': True, 'is_shared': True,
                 })
 
         dashboard_data['has_shared_devices'] = len(shared_creds) > 0
 
-        # 【修复】清理不完整条目：如果共享凭据中有对应平台但 DeviceCache 中只有不完整配置，
-        # 说明是之前的 token 泄露残留，删除它防止阻挡共享注入
         for platform_name in shared_creds:
             rec = user_platforms.get(platform_name)
             if rec and not rec.is_complete and not rec.is_ble:
-                logger.info(f'[Dashboard] 清理 user={user_id} 的不完整 {platform_name} 残留配置')
+                logger.info(f'[Dashboard] 清理 user={user_id} 的不完整 {platform_name} 残留')
                 await device_cache.invalidate_platform(user_id, platform_name)
-                # 【修复】同时从已组装的 device_platforms 中移除
+                need_device_invalidate = True
                 dashboard_data['device_platforms'] = [
                     p for p in dashboard_data.get('device_platforms', [])
                     if not (p['platform'] == platform_name and not p['is_complete'])
                 ]
-                # 【修复】同时删除 DB 中的残留 token，防止下次启动时重载过期 token 重登失败
-                def _cleanup_db():
-                    from .models.models import SystemConfig
-                    from .models.db import engine
-                    from sqlmodel import Session, select
-                    with Session(engine) as s:
-                        stmt = select(SystemConfig).where(
-                            SystemConfig.user_id == user_id,
-                            SystemConfig.platform == platform_name,
-                            SystemConfig.is_active == True
-                        )
-                        rows = s.exec(stmt).all()
-                        for row in rows:
-                            if row.key not in ('account', 'password'):
-                                row.is_active = False
-                                s.add(row)
-                        s.commit()
-                        return len(rows)
-                cleaned = await asyncio.get_running_loop().run_in_executor(None, _cleanup_db)
-                if cleaned:
-                    logger.info(f'[Dashboard] 已清理 DB 中 user={user_id} 的 {platform_name} 残留记录')
 
-        # 并行获取PetKit设备和CloudPets数据
-        async def fetch_petkit_devices():
-            """获取PetKit设备列表（含 token 双写，共享凭据时不写回）"""
-            if not petkit_username or not petkit_password:
-                return []
+        # ── 3. 从 Redis 读取第三方缓存数据 ──
+        pk_user_id = await _get_first_user_with_platform("petkit")
+        petkit_devices = []
+        if pk_user_id:
+            cached = await redis_cache.get(f"user_{pk_user_id}_petkit_devices")
+            if cached:
+                # 裁剪响应载荷：移除 verbose 的 raw_state 字符串
+                petkit_devices = _trim_petkit_payload(cached)
 
-            if state.petkit and getattr(state.petkit, 'user_id', None) == user_id:
-                pk_svc = state.petkit
-                devices = await pk_svc.get_devices()
-                mem_session = getattr(pk_svc, '_memory_session', None)
-                # 【修复】共享凭据的 token 不写回接受者的 SystemConfig
-                if mem_session and petkit_rec and not using_shared_petkit:
-                    from .utils.config_manager import update_cloud_device_token
-                    await update_cloud_device_token(user_id, 'petkit', json.dumps(mem_session), petkit_rec.device_name)
-            else:
-                temp_service = PetKitService(petkit_username, petkit_password, user_id=user_id)
-                await temp_service.initialize()
-                devices = await temp_service.get_devices()
-                mem_session = getattr(temp_service, '_memory_session', None)
-                if mem_session and petkit_rec and not using_shared_petkit:
-                    from .utils.config_manager import update_cloud_device_token
-                    await update_cloud_device_token(user_id, 'petkit', json.dumps(mem_session), petkit_rec.device_name)
-                await temp_service.close()
+        cp_user_id = await _get_first_user_with_platform("cloudpets")
+        cloudpets_servings = {}
+        cloudpets_plans = []
+        if cp_user_id:
+            cached_sv = await redis_cache.get(f"user_{cp_user_id}_cloudpets_servings")
+            if cached_sv:
+                cloudpets_servings = cached_sv
+            cached_pl = await redis_cache.get(f"user_{cp_user_id}_cloudpets_plans")
+            if cached_pl:
+                cloudpets_plans = cached_pl
 
-            return devices
+        dashboard_data['petkit_devices'] = petkit_devices
+        dashboard_data['cloudpets_servings'] = cloudpets_servings
+        dashboard_data['cloudpets_plans'] = cloudpets_plans
 
-        async def fetch_cloudpets_data():
-            """获取CloudPets数据（servings + plans，共享凭据时不写回 token）"""
-            result = {"servings": {}, "plans": []}
+        # ── 4. 体脂秤状态 + 今日统计（DB 查询，Redis 缓存 60s） ──
+        scale_cache_key = f"scale_stats:user_{user_id}"
+        cached_scale = await redis_cache.get(scale_cache_key)
+        if cached_scale is not None:
+            dashboard_data['scale_stats'] = cached_scale
+            dashboard_data['xiaomi_config'] = cached_scale.get('_xiaomi_config', False)
+        else:
+            xiaomi_rec = user_platforms.get('xiaomi')
+            dashboard_data['xiaomi_config'] = (
+                (xiaomi_rec is not None and xiaomi_rec.is_complete) if xiaomi_rec else ('xiaomi' in shared_creds)
+            )
 
-            if not cloudpets_account or not cloudpets_password:
-                return result
+            try:
+                from datetime import datetime
+                from sqlalchemy import func
+                today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+                today_end = int(datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp() * 1000)
 
-            if state.cloudpets and getattr(state.cloudpets, 'user_id', None) == user_id:
-                cp_svc = state.cloudpets
-                servings = await cp_svc.get_servings_today()
-                plans = await cp_svc.get_feeding_plans()
-                mem_token = getattr(cp_svc, '_memory_token', None)
-                # 【修复】共享凭据的 token 不写回接受者的 SystemConfig
-                if mem_token and cloudpets_rec and not using_shared_cloudpets:
-                    from .utils.config_manager import update_cloud_device_token
-                    await update_cloud_device_token(user_id, 'cloudpets', mem_token, cloudpets_rec.device_name)
-            else:
-                import backend.app.services.cloudpets_service as cp_module
-                temp_service = cp_module.CloudPetsService(user_id=user_id)
-                # 【修复】必须传入 cloudpets_account/password（共享凭据场景）
-                await temp_service.initialize(account=cloudpets_account, password=cloudpets_password)
-                servings = await temp_service.get_servings_today()
-                plans = await temp_service.get_feeding_plans()
-                mem_token = getattr(temp_service, '_memory_token', None)
-                # 【修复】共享凭据的 token 不写回接受者的 SystemConfig
-                if mem_token and cloudpets_rec and not using_shared_cloudpets:
-                    from .utils.config_manager import update_cloud_device_token
-                    await update_cloud_device_token(user_id, 'cloudpets', mem_token, cloudpets_rec.device_name)
-                await temp_service.close()
+                # 优化：使用 COUNT 替代加载全量记录
+                count_stmt = select(func.count(WeightRecord.id)).where(
+                    WeightRecord.user_id == user_id,
+                    WeightRecord.timestamp >= today_start,
+                    WeightRecord.timestamp <= today_end,
+                )
+                today_count = session.exec(count_stmt).one()
 
-            # 【修复】过滤 CloudPets API 错误响应（如 401），不传给前端
-            if isinstance(servings, dict) and servings.get('code') == 401:
-                servings = {}
-            if not isinstance(plans, list) or (isinstance(plans, dict) and plans.get('code') == 401):
-                plans = []
-            result["servings"] = servings or {}
-            result["plans"] = plans or []
-            return result
+                # 只查最新一条记录的 body_fat
+                latest_stmt = select(WeightRecord.body_fat).where(
+                    WeightRecord.user_id == user_id,
+                    WeightRecord.timestamp >= today_start,
+                    WeightRecord.timestamp <= today_end,
+                    WeightRecord.body_fat.isnot(None),
+                ).order_by(WeightRecord.timestamp.desc()).limit(1)
+                latest_fat = session.exec(latest_stmt).first()
 
-        # 并行执行独立的外部API调用
-        petkit_devices, cloudpets_data = await asyncio.gather(
-            fetch_petkit_devices(),
-            fetch_cloudpets_data(),
-            return_exceptions=True
-        )
+                scale_stats = {
+                    'today_count': today_count,
+                    'latest_body_fat': round(latest_fat, 1) if latest_fat else None,
+                    '_xiaomi_config': dashboard_data['xiaomi_config'],
+                }
+                await redis_cache.set(scale_cache_key, scale_stats, ttl=60)
+                dashboard_data['scale_stats'] = {
+                    'today_count': today_count,
+                    'latest_body_fat': round(latest_fat, 1) if latest_fat else None,
+                }
+            except Exception as e:
+                logger.error(f'[Dashboard] 体脂秤统计失败: {e}')
+                dashboard_data['scale_stats'] = {'today_count': 0, 'latest_body_fat': None}
 
-        # 处理异常
-        if isinstance(petkit_devices, Exception):
-            logger.error(f"Failed to fetch PetKit devices: {petkit_devices}")
-            petkit_devices = []
-        if isinstance(cloudpets_data, Exception):
-            logger.error(f"Failed to fetch CloudPets data: {cloudpets_data}")
-            cloudpets_data = {"servings": {}, "plans": []}
-
-        dashboard_data['petkit_devices'] = petkit_devices or []
-        dashboard_data['cloudpets_servings'] = cloudpets_data.get('servings', {})
-        dashboard_data['cloudpets_plans'] = cloudpets_data.get('plans', [])
-
-        # token 可能已更新，刷新 DeviceCache
-        from .utils.device_cache import device_cache as _dc
-        await _dc.invalidate_user(user_id)
-
-        # 体脂秤配置（来自缓存记录 或 共享设备）
-        dashboard_data['xiaomi_config'] = (xiaomi_rec is not None and xiaomi_rec.is_complete) if xiaomi_rec else ('xiaomi' in shared_creds)
-
-        # 获取体脂秤统计数据
-        try:
-            from datetime import datetime, timedelta
-            from .models.models import WeightRecord
-            from sqlmodel import select
-
-            # 计算今天的开始和结束时间戳（毫秒）
-            today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
-            today_end = int(datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp() * 1000)
-
-            # 查询今日测量次数
-            stmt_today_count = select(WeightRecord).where(
-                WeightRecord.user_id == user_id,
-                WeightRecord.timestamp >= today_start,
-                WeightRecord.timestamp <= today_end
-            ).order_by(WeightRecord.timestamp.desc())
-            today_records = session.exec(stmt_today_count).all()
-            today_count = len(today_records)
-
-            # 查询最新一次测量的体脂率
-            latest_body_fat = None
-            if today_records:
-                latest_record = today_records[0]
-                if latest_record.body_fat:
-                    latest_body_fat = round(latest_record.body_fat, 1)
-
-            scale_stats = {
-                'today_count': today_count,
-                'latest_body_fat': latest_body_fat
-            }
-
-            logger.info(f'[Dashboard] 体脂秤统计 - 今日测量: {today_count}, 最新体脂: {latest_body_fat}')
-            dashboard_data['scale_stats'] = scale_stats
-        except Exception as e:
-            logger.error(f'[Dashboard] 获取体脂秤统计失败: {e}')
-            dashboard_data['scale_stats'] = {'today_count': 0, 'latest_body_fat': None}
-
-        # 【诊断】打印 device_platforms 内容，确认共享设备是否注入
-        plat_summary = [
-            f"{p.get('platform')}(shared={p.get('is_shared', False)},complete={p.get('is_complete', False)})"
-            for p in dashboard_data.get('device_platforms', [])
-        ]
-        logger.info(f'[Dashboard] user={user_id} device_platforms: {plat_summary}')
-
+        logger.info(f'[Dashboard] user={user_id} platforms={len(dashboard_data["device_platforms"])}')
         return dashboard_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取仪表板数据失败：{str(e)}")
+
+
+def _trim_petkit_payload(devices: list) -> list:
+    """裁剪 PetKit 设备响应，移除 verbose 的 raw_state 调试字段（可节省 60%+ 载荷）"""
+    trimmed = []
+    for dev in devices:
+        if not isinstance(dev, dict):
+            trimmed.append(dev)
+            continue
+        state = dev.get('state_summary')
+        if state and isinstance(state, dict):
+            state.pop('raw_state', None)
+            state.pop('raw_state_str', None)
+        # 移除 data 字段中的冗长原始数据
+        data = dev.get('data')
+        if data and isinstance(data, dict):
+            data.pop('raw_data', None)
+        trimmed.append(dev)
+    return trimmed
 # --- PetKit APIs ---
 @app.get("/api/petkit/devices")
 async def petkit_devices(user_id: Optional[int] = None):
@@ -783,7 +706,7 @@ async def petkit_daily_stats(device_id: Optional[str] = None, user_id: Optional[
             device_id = None
 
         cache_key = f'user_{user_id}_petkit_stats_{device_id or "default"}'
-        cached_stats = await cache_manager.get(cache_key)
+        cached_stats = await redis_cache.get(cache_key)
         if cached_stats:
             return cached_stats
 
@@ -800,7 +723,7 @@ async def petkit_daily_stats(device_id: Optional[str] = None, user_id: Optional[
         if not (state.petkit and getattr(state.petkit, 'user_id', None) == user_id):
             await service.close()
 
-        await cache_manager.set(cache_key, stats, ttl=180)
+        await redis_cache.set(cache_key, stats, ttl=180)
         return stats
     except HTTPException:
         raise
@@ -850,7 +773,7 @@ async def petkit_devices_with_stats(user_id: Optional[int] = None):
                 raise HTTPException(status_code=503, detail="PetKit service not configured")
 
         cache_key = f'user_{user_id}_petkit_devices_with_stats'
-        cached_data = await cache_manager.get(cache_key)
+        cached_data = await redis_cache.get(cache_key)
         if cached_data:
             return cached_data
 
@@ -873,10 +796,10 @@ async def petkit_devices_with_stats(user_id: Optional[int] = None):
             device_id = getattr(device, 'id', '') if hasattr(device, 'id') else ''
             if device_id:
                 stats_cache_key = f'user_{user_id}_petkit_stats_{device_id}'
-                stats = await cache_manager.get(stats_cache_key)
+                stats = await redis_cache.get(stats_cache_key)
                 if not stats:
                     stats = await service.get_daily_stats(device_id)
-                    await cache_manager.set(stats_cache_key, stats, ttl=60)
+                    await redis_cache.set(stats_cache_key, stats, ttl=60)
 
                 device_dict = device if isinstance(device, dict) else {
                     "id": device_id, "name": getattr(device, 'name', 'Unknown'),
@@ -894,7 +817,7 @@ async def petkit_devices_with_stats(user_id: Optional[int] = None):
         if not (state.petkit and getattr(state.petkit, 'user_id', None) == user_id):
             await service.close()
 
-        await cache_manager.set(cache_key, result, ttl=60)
+        await redis_cache.set(cache_key, result, ttl=60)
         return result
     except HTTPException:
         raise
@@ -912,7 +835,7 @@ async def cloudpets_servings_today(user_id: Optional[int] = None):
                 return {"result": 0}
 
         cache_key = f'user_{user_id}_cloudpets_servings'
-        cached = await cache_manager.get(cache_key)
+        cached = await redis_cache.get(cache_key)
         if cached:
             return cached
 
@@ -929,7 +852,7 @@ async def cloudpets_servings_today(user_id: Optional[int] = None):
         if isinstance(result, dict) and str(result.get("code")) in ("401", "500", "403"):
             logger.warning(f"[Cache] 跳过缓存 CloudPets 错误响应: code={result.get('code')}, msg={result.get('message')}")
         else:
-            await cache_manager.set(cache_key, result, ttl=120)
+            await redis_cache.set(cache_key, result, ttl=120)
         return result
     except Exception as e:
         logger.error(f"Failed to get servings: {e}")
@@ -967,7 +890,7 @@ async def cloudpets_get_plans(user_id: Optional[int] = None):
                 return []
 
         cache_key = f'user_{user_id}_cloudpets_plans'
-        cached = await cache_manager.get(cache_key)
+        cached = await redis_cache.get(cache_key)
         if cached:
             return cached
 
@@ -983,12 +906,12 @@ async def cloudpets_get_plans(user_id: Optional[int] = None):
         # 【修复】不缓存空列表结果（可能来自401错误响应的退化处理）
         # 仅当 plans 非空且无错误时缓存
         if isinstance(plans, list) and len(plans) > 0:
-            await cache_manager.set(cache_key, plans, ttl=300)
+            await redis_cache.set(cache_key, plans, ttl=300)
         elif isinstance(plans, dict) and str(plans.get("code")) in ("401", "500", "403"):
             logger.warning(f"[Cache] 跳过缓存 CloudPets 计划错误响应: code={plans.get('code')}")
         else:
             # 空结果仅缓存较短时间，避免内容为空时长时间无刷新
-            await cache_manager.set(cache_key, plans, ttl=60)
+            await redis_cache.set(cache_key, plans, ttl=60)
         return plans
     except Exception as e:
         logger.error(f"Failed to get plans: {e}")
@@ -1012,7 +935,7 @@ async def cloudpets_add_plan(plan: CloudPetsPlan, user_id: Optional[int] = None)
         finally:
             await _release_service(service, is_temp)
 
-        await cache_manager.delete(f'user_{user_id}_cloudpets_plans')
+        await redis_cache.delete(f'user_{user_id}_cloudpets_plans')
         return result
     except HTTPException:
         raise
@@ -1037,7 +960,7 @@ async def cloudpets_update_plan(plan_id: str, plan: CloudPetsPlan, user_id: Opti
         finally:
             await _release_service(service, is_temp)
 
-        await cache_manager.delete(f'user_{user_id}_cloudpets_plans')
+        await redis_cache.delete(f'user_{user_id}_cloudpets_plans')
         return result
     except HTTPException:
         raise
@@ -1062,7 +985,7 @@ async def cloudpets_delete_plan(plan_id: str, user_id: Optional[int] = None):
         finally:
             await _release_service(service, is_temp)
 
-        await cache_manager.delete(f'user_{user_id}_cloudpets_plans')
+        await redis_cache.delete(f'user_{user_id}_cloudpets_plans')
         return result
     except HTTPException:
         raise
@@ -1125,27 +1048,19 @@ async def check_user_config(user_id: str):
 # WeChat 小程序登录认证（OpenID 绑定 + 静默免密直登）
 # ============================================================================
 
-# --- 运行时动态配置缓存（启动时从 systemconfig 加载，支持运行时更新）---
-_global_configs: dict = {}  # 所有运行时配置的全局缓存
+# --- 运行时动态配置（存储在 Redis 中，启动时从 systemconfig 加载）---
+_GLOBAL_CONFIG_KEYS = ["WECHAT_APPID", "WECHAT_SECRET", "TOKEN_EXPIRE_HOURS"]
+_GLOBAL_CONFIG_REDIS_KEY = "global_configs"
 
-# 需要从 systemconfig(user_id=0) 加载的配置键列表
-_GLOBAL_CONFIG_KEYS = [
-    "WECHAT_APPID",
-    "WECHAT_SECRET",
-    "TOKEN_EXPIRE_HOURS",
-]
-
-
-def _get_token_expire_ms() -> int:
-    """
-    从全局缓存获取 token 过期毫秒数
-    若无缓存（如单元测试），回退默认 720 小时
-    """
-    hours_str = _global_configs.get("TOKEN_EXPIRE_HOURS") or "720"
+async def _get_token_expire_ms() -> int:
+    """从 Redis 获取 token 过期毫秒数，回退默认 720 小时"""
+    from .utils.redis_cache import redis_cache
+    data = await redis_cache.get(_GLOBAL_CONFIG_REDIS_KEY) or {}
+    hours_str = data.get("TOKEN_EXPIRE_HOURS") or "720"
     return int(hours_str) * 3600 * 1000
 
 
-def generate_session_token() -> tuple[str, str, int]:
+async def generate_session_token() -> tuple[str, str, int]:
     """
     生成会话 token
     返回: (raw_token, token_hash, expires_at)
@@ -1155,7 +1070,7 @@ def generate_session_token() -> tuple[str, str, int]:
     """
     raw_token = secrets.token_hex(32)
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
-    expires_at = int(time.time() * 1000) + _get_token_expire_ms()
+    expires_at = int(time.time() * 1000) + await _get_token_expire_ms()
     return raw_token, token_hash, expires_at
 
 
@@ -1203,14 +1118,14 @@ def verify_password(plain_password: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain_password.encode("utf-8"), hashed.encode("utf-8"))
 
 
-# --- 系统配置全局缓存：从 systemconfig(user_id=0) 加载，支持运行时刷新 ---
+# --- 系统配置全局缓存（存储在 Redis，启动时从 systemconfig 加载）---
 async def _load_global_configs():
     """
-    启动时／刷新时从 systemconfig 加载所有全局配置到 _global_configs
+    启动时从 systemconfig 加载所有全局配置到 Redis
     始终先读 DB，DB 缺失则回退环境变量（确保启动可用）
     """
-    global _global_configs
     from .utils.config_manager import get_config_from_db
+    from .utils.redis_cache import redis_cache
 
     loaded = {}
     for key in _GLOBAL_CONFIG_KEYS:
@@ -1218,7 +1133,6 @@ async def _load_global_configs():
         if db_val:
             loaded[key] = db_val.strip()
         else:
-            # 回退：WECHAT_* 从环境变量读取（开发便利），TOKEN 用硬编码默认值
             if key == "TOKEN_EXPIRE_HOURS":
                 loaded[key] = "720"
             else:
@@ -1226,24 +1140,24 @@ async def _load_global_configs():
                 if env_val:
                     loaded[key] = env_val.strip()
 
-    _global_configs = loaded
-    missing = [k for k in _GLOBAL_CONFIG_KEYS if k not in _global_configs]
+    await redis_cache.set(_GLOBAL_CONFIG_REDIS_KEY, loaded, ttl=86400)
+    missing = [k for k in _GLOBAL_CONFIG_KEYS if k not in loaded]
     if missing:
         logger.warning(f"⚠ systemconfig+env 均缺失以下配置: {missing}")
     else:
-        logger.info(f"✓ 全局配置已加载到缓存: {list(_global_configs.keys())}")
+        logger.info(f"✓ 全局配置已加载到 Redis: {list(loaded.keys())}")
 
 
 async def _ensure_global_config(key: str) -> str:
-    """
-    按需获取单个全局配置值（惰性兜底）
-    若缓存为空则尝试刷新，失败抛 500
-    """
-    val = _global_configs.get(key)
+    """按需从 Redis 获取单个全局配置值，失败抛 500"""
+    from .utils.redis_cache import redis_cache
+    data = await redis_cache.get(_GLOBAL_CONFIG_REDIS_KEY) or {}
+    val = data.get(key)
     if val:
         return val
     await _load_global_configs()
-    val = _global_configs.get(key)
+    data = await redis_cache.get(_GLOBAL_CONFIG_REDIS_KEY) or {}
+    val = data.get(key)
     if not val:
         raise HTTPException(
             status_code=500,
@@ -1422,8 +1336,8 @@ async def auth_bind_login(request: BindLoginRequest, session: Session = Depends(
     session.commit()
     session.refresh(user)
 
-    # --- 6. 签发会话 Token（替换JWT）---
-    raw_token, token_hash, expires_at = generate_session_token()
+    # --- 6. 签发会话 Token
+    raw_token, token_hash, expires_at = await generate_session_token()
     user.token_hash = token_hash
     user.token_expires_at = expires_at
     session.add(user)
@@ -1491,8 +1405,8 @@ async def auth_silent_login(request: SilentLoginRequest, session: Session = Depe
     session.commit()
     session.refresh(user)
 
-    # --- 4. 签发会话 Token（替换JWT）---
-    raw_token, token_hash, expires_at = generate_session_token()
+    # --- 4. 签发会话 Token
+    raw_token, token_hash, expires_at = await generate_session_token()
     user.token_hash = token_hash
     user.token_expires_at = expires_at
     session.add(user)
@@ -1583,7 +1497,7 @@ async def bind_scale_device(request: ScaleBindRequest, user_id: str):
             f'{cache_prefix}_cloudpets_plans',
             f'{cache_prefix}_petkit_devices',
         ]:
-            await cache_manager.delete(cache_key)
+            await redis_cache.delete(cache_key)
 
         logger.info(f"体脂秤绑定成功: user={uid}, device={ble_device_id}, name={ble_device_name}")
 
@@ -1647,18 +1561,18 @@ async def add_device_api(request: AddDeviceRequest, user_id: str):
                 request.platform, uid, request.account, request.password
             )
             if init_ok:
-                if request.platform == "petkit" and state.petkit is not None:
-                    mem_session = getattr(state.petkit, '_memory_session', None)
-                    if mem_session:
-                        token = json.dumps(mem_session)
-                        logger.info(f"[AddDevice] PetKit token 已提取: user={uid}")
+                # 从 Redis 读取刚刚保存的 token/session
+                from ..utils.redis_cache import redis_cache
+                if request.platform == "petkit":
+                    session_data = await redis_cache.get(f"petkit_session:user_{uid}")
+                    if session_data:
+                        token = json.dumps(session_data)
+                        logger.info(f"[AddDevice] PetKit token 已从 Redis 提取: user={uid}")
                 elif request.platform == "cloudpets":
-                    cp = state.cloudpets
-                    if cp is not None:
-                        mem_token = getattr(cp, '_memory_token', None)
-                        if mem_token:
-                            token = mem_token
-                            logger.info(f"[AddDevice] CloudPets token 已提取: user={uid}")
+                    redis_token = await redis_cache.get(f"cloudpets_token:user_{uid}")
+                    if redis_token:
+                        token = redis_token
+                        logger.info(f"[AddDevice] CloudPets token 已从 Redis 提取: user={uid}")
                 if not token:
                     logger.warning(f"[AddDevice] {request.platform} token 为空，user={uid} 的设备配置组将 is_complete=False")
         if not init_ok:
@@ -1683,10 +1597,10 @@ async def add_device_api(request: AddDeviceRequest, user_id: str):
         from .utils.device_cache import device_cache
         await device_cache.invalidate_user(uid)
         cache_prefix = f'user_{uid}'
-        await cache_manager.delete(f'{cache_prefix}_dashboard_combined_data')
-        await cache_manager.delete(f'{cache_prefix}_petkit_devices')
-        await cache_manager.delete(f'{cache_prefix}_cloudpets_servings')
-        await cache_manager.delete(f'{cache_prefix}_cloudpets_plans')
+        await redis_cache.delete(f'{cache_prefix}_dashboard_combined_data')
+        await redis_cache.delete(f'{cache_prefix}_petkit_devices')
+        await redis_cache.delete(f'{cache_prefix}_cloudpets_servings')
+        await redis_cache.delete(f'{cache_prefix}_cloudpets_plans')
         logger.info(f"[AddDevice] 缓存已清除: user={uid}")
 
         return DeviceResponse(
@@ -1761,10 +1675,10 @@ async def delete_device_api(device_key: str, user_id: str):
         from .utils.device_cache import device_cache
         await device_cache.invalidate_user(uid)
         cache_prefix = f'user_{uid}'
-        await cache_manager.delete(f'{cache_prefix}_dashboard_combined_data')
-        await cache_manager.delete(f'{cache_prefix}_cloudpets_servings')
-        await cache_manager.delete(f'{cache_prefix}_cloudpets_plans')
-        await cache_manager.delete(f'{cache_prefix}_petkit_devices')
+        await redis_cache.delete(f'{cache_prefix}_dashboard_combined_data')
+        await redis_cache.delete(f'{cache_prefix}_cloudpets_servings')
+        await redis_cache.delete(f'{cache_prefix}_cloudpets_plans')
+        await redis_cache.delete(f'{cache_prefix}_petkit_devices')
         logger.info(f"Cleared all caches for user {uid} after device deletion")
 
         return {"status": "success", "message": "设备删除成功", "device_key": device_key}

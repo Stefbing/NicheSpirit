@@ -7,8 +7,8 @@
 
 // 配置：切换运行环境
 const CONFIG = {
-  // 'cloud' - 云托管模式, 'local' - 本地调试模式
-  mode: 'local',
+  // 'cloud' - 云托管模式, 'local' - 本地调试模式, 'prod' - 生产模式
+  mode: 'prod',
 
   // 云托管配置
   cloudEnv: 'prod-d5g0so0137afcfdd5',
@@ -16,6 +16,7 @@ const CONFIG = {
 
   // 本地调试配置（替换为你的本地后端地址）
   localBaseUrl: 'http://192.168.1.3:8000',
+  prodBaseUrl: 'https://api.stefbing.xyz',
 
   // 请求超时（ms）
   timeout: 15000,
@@ -58,7 +59,7 @@ function callContainer(options) {
   // 内部执行函数（支持重试）
   function doRequest(attempt) {
     return new Promise((resolve, reject) => {
-      const requestFn = CONFIG.mode === 'local' ? localRequest : cloudRequest;
+      const requestFn = CONFIG.mode === 'cloud' ? cloudRequest : httpRequest;
       requestFn(path, method, data, mergedHeader, effectiveTimeout)
         .then((result) => {
           if (success) success(result);
@@ -90,11 +91,14 @@ function callContainer(options) {
 }
 
 /**
- * 本地调试请求
+ * HTTP 请求 - 支持 local 和 prod 两种模式
+ * 根据当前 mode 自动选择对应的 baseUrl
  */
-function localRequest(path, method, data, header, timeout) {
-  const url = `${CONFIG.localBaseUrl}${path}`;
-  console.log(`[Request] → ${method} ${url}`);
+function httpRequest(path, method, data, header, timeout) {
+  const baseUrl = CONFIG.mode === 'local' ? CONFIG.localBaseUrl : CONFIG.prodBaseUrl;
+  const url = `${baseUrl}${path}`;
+  const modeLabel = CONFIG.mode === 'local' ? '本地' : '生产';
+  console.log(`[Request] [${modeLabel}] → ${method} ${url}`);
 
   return new Promise((resolve, reject) => {
     wx.request({
@@ -115,7 +119,7 @@ function localRequest(path, method, data, header, timeout) {
         }
       },
       fail: (err) => {
-        console.error(`[Request] ✗ 本地请求失败 [${url}]:`, err);
+        console.error(`[Request] ✗ HTTP 请求失败 [${url}]:`, err);
         reject(err);
       }
     });

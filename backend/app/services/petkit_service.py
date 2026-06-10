@@ -40,8 +40,6 @@ class PetKitService:
         self._devices_refresh_lock = asyncio.Lock()
         self._ssl_context = None
         self._initialized = False
-        # 内存层 session 缓存
-        self._memory_session: Optional[dict] = None
 
         # 延迟初始化，避免在 __init__ 中执行阻塞操作
         if not self.username or not self.password:
@@ -111,20 +109,22 @@ class PetKitService:
             return True
 
     async def _load_session_from_db(self) -> bool:
-        """Try to load the latest session data from database（二级缓存：内存 → DB）
+        """Try to load the latest session data（三级缓存：Redis → DB）
         使用标准化 key='token' + platform='petkit'"""
         try:
-            # ---- 1. 检查内存缓存 ----
-            if self._memory_session:
-                saved_time = self._memory_session.get('timestamp', 0)
+            session_key = self._session_cache_key()
+            from ..utils.redis_cache import redis_cache
+
+            # ---- 1. 检查 Redis 缓存 ----
+            redis_data = await redis_cache.get(session_key)
+            if redis_data:
+                saved_time = redis_data.get('timestamp', 0)
                 if int(time.time() * 1000) - saved_time <= SESSION_EXPIRY_MS:
-                    logger.info("PetKit session restored from memory cache")
-                    restored = await self._restore_session(self._memory_session)
+                    logger.info("PetKit session restored from Redis cache")
+                    restored = await self._restore_session(redis_data)
                     if restored:
                         self._initialized = True
                     return restored
-                else:
-                    self._memory_session = None  # 内存过期，清除
 
             # ---- 2. 从DB加载 ----
             loop = asyncio.get_event_loop()
@@ -145,17 +145,14 @@ class PetKitService:
             config_value = await loop.run_in_executor(None, _load)
 
             if config_value:
-                # 【修复】校验 JSON 格式，防止空值或非法数据崩溃
                 if not config_value.strip() or config_value.strip() in ('null', 'None', ''):
                     logger.warning("PetKit session data in DB is empty/invalid, need re-login")
-                    self._memory_session = None
                     return False
 
                 try:
                     session_data = json.loads(config_value)
                 except json.JSONDecodeError as e:
                     logger.warning(f"PetKit session JSON parse failed: {e}, will re-login")
-                    self._memory_session = None
                     return False
 
                 saved_time = session_data.get('timestamp', 0)
@@ -163,11 +160,10 @@ class PetKitService:
 
                 if current_time - saved_time > SESSION_EXPIRY_MS:
                     logger.info("PetKit session expired, need re-login")
-                    self._memory_session = None
                     return False
 
-                # 加载成功，写入内存缓存
-                self._memory_session = session_data
+                # 写入 Redis 缓存
+                await redis_cache.set(session_key, session_data, ttl=1800)
 
                 restored = await self._restore_session(session_data)
                 if restored:
@@ -177,48 +173,57 @@ class PetKitService:
             logger.warning(f"Could not load session from DB: {e}")
         return False
 
+    def _session_cache_key(self) -> str:
+        return f"petkit_session:user_{self.user_id or 0}"
+
     async def _save_session_to_db(self):
-        """Save current session data to database
-        使用标准化 key='token' + platform='petkit'"""
+        """Save current session data to database + Redis
+        使用标准化 key='token' + platform='petkit'
+        【修复】序列化前 sanitize 数据，确保 JSON 安全"""
         try:
             if not self.client or not self.session:
                 return
 
-            session_data = {
+            session_data: dict = {
                 'timestamp': int(time.time() * 1000),
                 'region': self.region,
                 'timezone': self.timezone,
                 'username': self.username,
-                'has_valid_session': True
+                'has_valid_session': True,
             }
 
             try:
                 if hasattr(self.client, 'req') and hasattr(self.client.req, 'session'):
-                    cookies = self.client.req.session.cookie_jar.filter_cookies()
-                    if cookies:
-                        session_data['cookies'] = str(cookies)
+                    raw_cookies = self.client.req.session.cookie_jar.filter_cookies()
+                    if raw_cookies:
+                        cookie_dict = {}
+                        for cookie in raw_cookies.values():
+                            cookie_dict[cookie.key] = cookie.value
+                        session_data['cookies_dict'] = cookie_dict
 
                     if hasattr(self.client.req, 'headers'):
                         auth_headers = {}
                         for key in ['authorization', 'token', 'x-auth-token', 'session-id']:
-                            if key in self.client.req.headers:
-                                auth_headers[key] = self.client.req.headers[key]
+                            val = self.client.req.headers.get(key)
+                            if val:
+                                auth_headers[key] = val
                         if auth_headers:
                             session_data['auth_headers'] = auth_headers
             except Exception as e:
                 logger.debug(f"Could not extract session details: {e}")
 
+            safe_json = json.dumps(session_data, ensure_ascii=False, default=str)
+
             loop = asyncio.get_event_loop()
 
             def _save():
                 with Session(engine) as session_db:
-                    # 查标准化 key='token' + platform='petkit'
                     statement = select(SystemConfig).where(
                         SystemConfig.key == 'token',
                         SystemConfig.platform == 'petkit',
                         SystemConfig.device_name == 'petkit',
                         SystemConfig.user_id == (self.user_id or 0),
-                        SystemConfig.is_active == True
+                        SystemConfig.is_active == True,
                     )
                     config = session_db.exec(statement).first()
 
@@ -228,13 +233,13 @@ class PetKitService:
                             key='token',
                             platform='petkit',
                             device_name='petkit',
-                            value=json.dumps(session_data),
+                            value=safe_json,
                             is_encrypted=False,
                             is_active=True,
                         )
                         session_db.add(config)
                     else:
-                        config.value = json.dumps(session_data)
+                        config.value = safe_json
                         config.updated_at = int(time.time() * 1000)
                         config.is_encrypted = False
                         session_db.add(config)
@@ -242,14 +247,16 @@ class PetKitService:
                     session_db.commit()
 
             await loop.run_in_executor(None, _save)
-            # 同步更新内存缓存
-            self._memory_session = session_data
-            logger.info("Saved PetKit session to database + memory cache")
+            # 同步写入 Redis
+            from ..utils.redis_cache import redis_cache
+            await redis_cache.set(self._session_cache_key(), session_data, ttl=1800)
+            logger.info("Saved PetKit session to database + Redis")
         except Exception as e:
             logger.error(f"Failed to save session to DB: {e}")
 
     async def _restore_session(self, session_data: dict) -> bool:
-        """Restore session from stored data"""
+        """Restore session from stored data
+        【修复】正确恢复 cookies 和 auth headers，避免每次强制重登"""
         try:
             saved_time = session_data.get('timestamp', 0)
             current_time = int(time.time() * 1000)
@@ -259,11 +266,39 @@ class PetKitService:
                 logger.info(f"Session too old ({age_minutes:.1f}min), will re-login")
                 return False
 
-            # 先关闭旧会话（如果有）
             await self._close_session()
 
             connector = aiohttp.TCPConnector(ssl=self._ssl_context) if self._ssl_context is not None else None
             self.session = aiohttp.ClientSession(connector=connector)
+
+            # 【修复】恢复 cookies
+            cookie_dict = session_data.get('cookies_dict')
+            if cookie_dict:
+                try:
+                    from aiohttp import CookieJar
+                    for name, value in cookie_dict.items():
+                        self.session.cookie_jar.update_cookies({name: value})
+                    logger.debug(f"Restored {len(cookie_dict)} cookies to PetKit session")
+                except Exception as e:
+                    logger.debug(f"Cookie restore failed (non-fatal): {e}")
+
+            # 【修复】恢复 auth headers
+            auth_headers = session_data.get('auth_headers', {})
+            for key, value in auth_headers.items():
+                self.session.headers[key] = value
+
+            # 【修复】恢复旧格式 cookies（兼容性）
+            old_cookies_str = session_data.get('cookies')
+            if old_cookies_str and not cookie_dict:
+                try:
+                    from http.cookies import SimpleCookie
+                    c = SimpleCookie()
+                    c.load(old_cookies_str)
+                    for morsel in c.values():
+                        self.session.cookie_jar.update_cookies({morsel.key: morsel.value})
+                    logger.debug("Restored cookies from legacy string format")
+                except Exception as e:
+                    logger.debug(f"Legacy cookie restore failed: {e}")
 
             self.client = PetKitClient(
                 username=self.username,
@@ -299,7 +334,6 @@ class PetKitService:
             finally:
                 self.session = None
                 self.client = None
-                self._memory_session = None
                 self._initialized = False
 
     async def _login(self) -> bool:

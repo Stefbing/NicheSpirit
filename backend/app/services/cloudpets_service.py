@@ -46,8 +46,6 @@ class CloudPetsService:
         self._client = None  # 延迟初始化客户端
         self._base_url = None
         self._device_id = None
-        # 二级缓存：内存层
-        self._memory_token = None
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -152,13 +150,17 @@ class CloudPetsService:
         return account
 
     async def _load_token_from_db(self) -> bool:
-        """Try to load the latest token from database（二级缓存：内存 → DB）
+        """Try to load the latest token from database（三级缓存：Redis → DB）
         使用标准化 key='token' + platform='cloudpets'"""
         try:
-            # ---- 1. 检查内存缓存 ----
-            if self._memory_token:
-                self.client.headers["authorization"] = self._memory_token
-                logger.info("Loaded CloudPets token from memory cache")
+            token_key = self._token_cache_key()
+            from ..utils.redis_cache import redis_cache
+
+            # ---- 1. 检查 Redis 缓存 ----
+            redis_token = await redis_cache.get(token_key)
+            if redis_token:
+                self.client.headers["authorization"] = redis_token
+                logger.info("Loaded CloudPets token from Redis cache")
                 return True
 
             # ---- 2. 从DB加载 ----
@@ -180,12 +182,15 @@ class CloudPetsService:
             token = await loop.run_in_executor(None, _load_token)
             if token:
                 self.client.headers["authorization"] = token
-                self._memory_token = token  # 写入内存缓存
-                logger.info("Loaded CloudPets token from database → memory cache")
+                await redis_cache.set(token_key, token, ttl=1800)
+                logger.info("Loaded CloudPets token from database → Redis")
                 return True
         except Exception as e:
             logger.warning(f"Could not load token from DB (might be first run): {e}")
         return False
+
+    def _token_cache_key(self) -> str:
+        return f"cloudpets_token:user_{self.user_id or 0}"
 
     async def _save_token_to_db(self, token: str):
         """Save new token to database
@@ -226,8 +231,10 @@ class CloudPetsService:
                     session.commit()
 
             await loop.run_in_executor(None, _save_token)
-            self._memory_token = token  # 同步更新内存缓存
-            logger.info("Saved new CloudPets token to database + memory cache")
+            # 同步写入 Redis
+            from ..utils.redis_cache import redis_cache
+            await redis_cache.set(self._token_cache_key(), token, ttl=1800)
+            logger.info("Saved new CloudPets token to database + Redis")
         except Exception as e:
             logger.error(f"Failed to save token to DB: {e}")
 
