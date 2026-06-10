@@ -68,9 +68,11 @@ def _get_device_configs_by_platforms(session: Session, user_id: int, platforms: 
         if plat not in result:
             result[plat] = {"account": "", "password": ""}
         if cfg.key == "account":
-            result[plat]["account"] = cfg.value
+            from .utils.config_encryptor import ConfigEncryptor
+            result[plat]["account"] = ConfigEncryptor.decrypt(cfg.value) if cfg.is_encrypted else cfg.value
         elif cfg.key == "password":
-            result[plat]["password"] = cfg.value
+            from .utils.config_encryptor import ConfigEncryptor
+            result[plat]["password"] = ConfigEncryptor.decrypt(cfg.value) if cfg.is_encrypted else cfg.value
     return result
 
 def _format_share_output(s: DeviceShare) -> dict:
@@ -223,10 +225,15 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
                 f'to_user={share.to_user_id} configs_created={len(created_configs)} '
                 f'configs={created_configs}')
 
-    # 清除接受者的设备缓存
+    # 清除接受者的设备缓存 + 共享凭据缓存
     try:
         from .utils.device_cache import device_cache
         await device_cache.invalidate_user(request.to_user_id)
+    except Exception:
+        pass
+    try:
+        from .utils.redis_cache import redis_cache
+        await redis_cache.delete(f"shared_creds:user_{request.to_user_id}")
     except Exception:
         pass
 
@@ -308,6 +315,8 @@ async def update_share_expiry(request: UpdateExpiryRequest, session: Session = D
             try:
                 from .utils.device_cache import device_cache
                 await device_cache.invalidate_user(share.to_user_id)
+                from .utils.redis_cache import redis_cache
+                await redis_cache.delete(f"shared_creds:user_{share.to_user_id}")
             except Exception:
                 pass
 
@@ -326,6 +335,8 @@ async def update_share_expiry(request: UpdateExpiryRequest, session: Session = D
         try:
             from .utils.device_cache import device_cache
             await device_cache.invalidate_user(share.to_user_id)
+            from .utils.redis_cache import redis_cache
+            await redis_cache.delete(f"shared_creds:user_{share.to_user_id}")
         except Exception:
             pass
 
@@ -369,8 +380,10 @@ async def check_expired_shares(request: CheckExpiredRequest, session: Session = 
     # 清除所有受影响的被分享者缓存
     try:
         from .utils.device_cache import device_cache
+        from .utils.redis_cache import redis_cache
         for uid in to_users:
             await device_cache.invalidate_user(uid)
+            await redis_cache.delete(f"shared_creds:user_{uid}")
     except Exception:
         pass
 
@@ -447,6 +460,11 @@ async def revoke_share(share_id: int, user_id: int, session: Session = Depends(g
         try:
             from .utils.device_cache import device_cache
             await device_cache.invalidate_user(share.to_user_id)
+        except Exception:
+            pass
+        try:
+            from .utils.redis_cache import redis_cache
+            await redis_cache.delete(f"shared_creds:user_{share.to_user_id}")
         except Exception:
             pass
 
