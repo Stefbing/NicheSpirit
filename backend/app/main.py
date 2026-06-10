@@ -1268,13 +1268,13 @@ async def wx_code2session(code: str) -> dict:
         "grant_type": "authorization_code",
     }
 
-    # 云托管环境可能缺失系统 CA 证书，先尝试默认验证，失败则降级
+    # 部分环境可能缺失系统 CA 证书，先尝试默认验证，失败则降级
     for attempt, verify in enumerate([True, False]):
         try:
             client_kwargs = {"timeout": 10.0}
             if not verify:
                 client_kwargs["verify"] = False
-                logger.warning("微信 API SSL 验证已禁用（云托管环境兼容模式）")
+                logger.warning("微信 API SSL 验证已禁用（降级模式）")
             async with httpx.AsyncClient(**client_kwargs) as client:
                 resp = await client.get(url, params=params)
                 data = resp.json()

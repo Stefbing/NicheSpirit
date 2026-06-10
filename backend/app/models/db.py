@@ -24,7 +24,7 @@ if not all([mysql_host, mysql_user, mysql_password]):
     raise EnvironmentError(
         "必须配置 MYSQL_ADDRESS、MYSQL_USERNAME、MYSQL_PASSWORD 环境变量\n"
         "开发环境：创建.env文件并填写配置\n"
-        "生产环境：在微信云托管控制台配置环境变量"
+        "生产环境：在服务器环境变量或 .env 中配置"
     )
 
 database_url = f"mysql+pymysql://{mysql_user}:{mysql_password}@{mysql_host}/auto_home"

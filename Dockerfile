@@ -19,10 +19,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制项目代码
 COPY . .
 
-# 微信云托管默认监听 80 端口
-EXPOSE 80
+# 后端 API 端口
+EXPOSE 8000
 
 # 启动命令
-# 注意：你需要确保你的 FastAPI 入口路径正确
-# 按照你 repo 的结构，应该是 backend.app.main:app
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "80"]
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
