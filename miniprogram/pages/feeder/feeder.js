@@ -84,6 +84,9 @@ Page({
         });
         // 刷新今日喂食次数
         this.fetchTodayServings();
+        // 【修复】使用统一的数据更新通知接口，确保返回首页时能显示最新数据
+        const app = getApp();
+        app.notifyDataUpdate('feeder', ['cloudpets_servings']);
       },
       fail: err => {
         wx.hideLoading();
@@ -182,9 +185,9 @@ Page({
           title: e.detail.value ? '已启用' : '已禁用',
           icon: 'success'
         });
-        // 【修复】优雅刷新首页缓存（仅标记 plans + servings 为需刷新）
+        // 【优化】使用统一的数据更新通知接口
         const app = getApp();
-        app.refreshDashboardCache(['cloudpets_plans', 'cloudpets_servings']);
+        app.notifyDataUpdate('feeder', ['cloudpets_plans', 'cloudpets_servings']);
       },
       fail: err => {
         console.error('更新喂食计划失败:', err);
@@ -288,9 +291,9 @@ Page({
         wx.showToast({ title: '添加成功', icon: 'success' });
         this.closeAddPlanModal();
         this.fetchPlans(); // 刷新计划列表
-        // 【修复】优雅刷新首页缓存（仅标记 plans 为需刷新）
+        // 【优化】使用统一的数据更新通知接口
         const app = getApp();
-        app.refreshDashboardCache(['cloudpets_plans']);
+        app.notifyDataUpdate('feeder', ['cloudpets_plans']);
       },
       fail: err => {
         wx.hideLoading();
@@ -334,9 +337,9 @@ Page({
               wx.hideLoading();
               wx.showToast({ title: '删除成功', icon: 'success' });
               this.fetchPlans(); // 刷新计划列表
-              // 【修复】优雅刷新首页缓存（仅标记 plans 为需刷新）
+              // 【优化】使用统一的数据更新通知接口
               const app = getApp();
-              app.refreshDashboardCache(['cloudpets_plans']);
+              app.notifyDataUpdate('feeder', ['cloudpets_plans']);
             },
             fail: err => {
               wx.hideLoading();

@@ -153,6 +153,12 @@ Page({
           refreshing: false
         });
 
+        // 【修复】通知首页刷新 petkit_devices 缓存（确保返回首页时显示最新数据）
+        const app = getApp();
+        if (app.notifyDataUpdate && devicesWithStats.length > 0) {
+          app.notifyDataUpdate('petkit', ['petkit_devices']);
+        }
+
         if (!silent) {
           if (stats.warning) {
             wx.showModal({

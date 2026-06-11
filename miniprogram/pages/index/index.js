@@ -97,9 +97,20 @@ Page({
     if (this.data.userInfo) {
       this.registerDeviceStatusListener();
 
-      // 每次页面显示都重新加载设备列表（防缓存/并发导致数据未及时渲染）
-      console.log('[首页] 🔄 页面显示，刷新设备列表');
-      this.loadUserDevices();
+      // 【优化】智能刷新策略：检测是否从二级页面返回
+      const pages = getCurrentPages();
+      const isReturningFromSubPage = pages.length >= 2;
+
+      if (isReturningFromSubPage) {
+        // 从二级页面返回：使用较短的缓存时间，确保数据及时更新
+        console.log('[首页] 🔄 检测到从二级页面返回，使用即时刷新模式');
+        this.isLoadingDevices = false;  // 重置锁
+        this.loadUserDevices(true);     // forceRefresh=true
+      } else {
+        // 正常显示（首次加载或从后台恢复）
+        console.log('[首页] 🔄 页面显示，正常刷新设备列表');
+        this.loadUserDevices();         // forceRefresh=false，使用智能缓存
+      }
     }
   },
   
@@ -445,9 +456,9 @@ Page({
       wx.showToast({ title: '添加成功', icon: 'success' })
       
       this.closeDeviceConfigModal()
-      // 【修复】优雅刷新缓存（标记设备/云平台/体脂秤为需刷新）
+      // 【优化】使用统一的数据更新通知接口（设备添加场景）
       const app = getApp()
-      app.refreshDashboardCache([
+      app.notifyDataUpdate('device_add', [
         'device_platforms', 'cloudpets_plans', 'cloudpets_servings',
         'petkit_devices', 'xiaomi_config', 'scale_stats'
       ])
@@ -661,9 +672,9 @@ Page({
       // 关闭弹窗（保留 suppress 标记 2 秒，避免 BLE 立即跳转称重页覆盖提示）
       this.setData({ showScaleScanningDialog: false })
 
-      // 刷新设备列表（仅标记体脂秤相关项为需刷新）
+      // 【优化】使用统一的数据更新通知接口（体脂秤绑定场景）
       const app = getApp()
-      app.refreshDashboardCache(['device_platforms', 'xiaomi_config', 'scale_stats'])
+      app.notifyDataUpdate('device_add', ['device_platforms', 'xiaomi_config', 'scale_stats'])
       // 【修复】重置加载锁，确保能发起新请求
       this.isLoadingDevices = false
       this.devicesLoaded = false
@@ -788,16 +799,16 @@ Page({
       wx.hideLoading()
       wx.showToast({ title: '删除成功', icon: 'success' })
 
-      // 清除 dashboard 缓存（标记所有项为需刷新）
+      // 【优化】使用统一的数据更新通知接口（设备删除场景）
       const app = getApp();
-      app.refreshDashboardCache([
+      app.notifyDataUpdate('device_add', [
         'device_platforms', 'cloudpets_plans', 'cloudpets_servings',
         'petkit_devices', 'xiaomi_config', 'scale_stats'
       ])
       // 【修复】重置加载锁，确保 loadUserDevices 能发起新请求
       this.isLoadingDevices = false
       this.devicesLoaded = false
-      
+
       // 刷新设备列表
       await this.loadUserDevices(true)
     } catch (err) {
@@ -1153,9 +1164,9 @@ Page({
       wx.hideLoading()
       if (res && res.success) {
         wx.showToast({ title: '设备已添加', icon: 'success', duration: 2000 })
-        // 【修复】清除前端30秒dashboard缓存，确保重新加载时拉取最新数据
+        // 【优化】使用统一的数据更新通知接口（接受分享场景）
         const app = getApp()
-        app.refreshDashboardCache([
+        app.notifyDataUpdate('device_add', [
           'device_platforms', 'cloudpets_plans', 'cloudpets_servings',
           'petkit_devices', 'xiaomi_config', 'scale_stats'
         ])

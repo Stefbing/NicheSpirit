@@ -1162,12 +1162,12 @@ Page({
           duration: 1500
         });
 
-        // 优雅刷新首页缓存（仅标记 scale_stats 为需刷新）
+        // 【优化】使用统一的数据更新通知接口
         const app = getApp();
         const userInfo = wx.getStorageSync('userInfo');
         if (userInfo && userInfo.user_id) {
-          console.log('[Scale] 🔄 标记 scale_stats 缓存需刷新');
-          app.refreshDashboardCache(['scale_stats']);
+          console.log('[Scale] 🔄 通知首页刷新 scale_stats');
+          app.notifyDataUpdate('scale', ['scale_stats']);
         }
       }
     } catch (err) {

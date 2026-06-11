@@ -1168,6 +1168,14 @@ async def petkit_devices_with_stats(current_user: User = Depends(get_current_use
             await service.close()
 
         await redis_cache.set(cache_key, result, ttl=60)
+
+        # 【修复】同步写入基础 petkit_devices 缓存（供 /api/dashboard/data 读取）
+        # devices-stats 接口被 litterbox 二级页面调用，但原来只写 _with_stats key
+        # 导致 dashboard 接口读取 user_{uid}_petkit_devices 时为空！
+        base_cache_key = f'user_{user_id}_petkit_devices'
+        await redis_cache.set(base_cache_key, result, ttl=300)
+        logger.info(f"[PetKit] devices-stats 已同步写入基础缓存: {base_cache_key}, {len(result)} 台设备")
+
         return result
     except HTTPException:
         raise

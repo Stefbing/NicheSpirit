@@ -42,13 +42,16 @@ App({
     timeSyncInProgress: false,  // 时间同步进行中标志
     lastTimeSyncDeviceId: null,  // 上次执行时间同步的设备ID
     lastTimeSyncTimestamp: 0,  // 上次执行时间同步的时间戳
-    
+
     // 页面跳转锁
     scalePageNavigationInFlight: false,  // 防止重复跳转到称重页
     suppressScaleAutoNavigate: false,  // 绑定阶段抑制自动跳转
 
     // 【防雪崩】缓存项定向刷新标记集合（刷新时不丢弃整个缓存）
     _staleKeys: new Set(),
+
+    // 【新增】最后数据更新时间戳（用于智能判断是否需要强制刷新）
+    _lastDataUpdateTime: 0,
   },
 
   // 已发现的体脂秤设备列表（供绑定界面使用）
@@ -225,21 +228,80 @@ App({
   },
 
   /**
-   * 获取Dashboard数据（带防重复请求 + 超时保护 + 定向合并刷新）
-   * @param {number} userId - 用户ID
+   * 【新增】统一的数据更新通知接口（供所有二级页面调用）
+   *
+   * 使用场景：
+   * - 二级页面从第三方API获取新数据成功后
+   * - 二级页面执行写操作（投喂、清洗、保存测量等）成功后
+   * - 任何需要首页显示最新数据的场景
+   *
+   * 调用方式：
+   *   const app = getApp();
+   *   app.notifyDataUpdate('feeder', ['cloudpets_servings', 'cloudpets_plans']);
+   *
+   * @param {string} source - 数据来源标识（用于日志，如 'feeder', 'scale', 'petkit'）
+   * @param {string[]} updatedKeys - 已更新的缓存项列表
+   */
+  notifyDataUpdate(source, updatedKeys = []) {
+    console.log(`[App] 📢 收到数据更新通知: source=${source}, keys=`, updatedKeys);
+
+    // 记录最后更新时间
+    this.globalData._lastDataUpdateTime = Date.now();
+
+    // 如果指定了更新的key，标记为stale；否则标记全部
+    if (updatedKeys && updatedKeys.length > 0) {
+      this.refreshDashboardCache(updatedKeys);
+    } else {
+      // 未指定key时，根据source推断
+      const keyMap = {
+        'feeder': ['cloudpets_servings', 'cloudpets_plans'],
+        'scale': ['scale_stats', 'xiaomi_config'],
+        'petkit': ['petkit_devices'],
+        'device_add': ['device_platforms', 'petkit_devices', 'cloudpets_plans', 'cloudpets_servings', 'xiaomi_config', 'scale_stats'],
+      };
+      const inferredKeys = keyMap[source] || [];
+      this.refreshDashboardCache(inferredKeys.length > 0 ? inferredKeys : []);
+    }
+  },
+   /* @param {number} userId - 用户ID
    * @param {number} timeout - 请求超时时间（默认 15s）
-   * @param {boolean} forceRefresh - 是否强制刷新（跳过30s缓存）
+   * @param {boolean} forceRefresh - 是否强制刷新（跳过缓存）
    * @returns {Promise} Dashboard数据
+   *
+   * 【优化】缓存策略：
+   * - 正常情况：15秒缓存（原30秒，缩短以提升实时性）
+   * - 从二级页面返回：5秒缓存（通过页面栈深度检测）
+   * - 有 staleKeys 标记：立即刷新
+   * - forceRefresh=true：立即刷新
    */
   async fetchDashboardData(userId, timeout = 15000, forceRefresh = false) {
     const g = this.globalData;
     const hasStaleKeys = g._staleKeys && g._staleKeys.size > 0;
 
+    // 【智能缓存过期时间计算】
+    // 检测是否从二级页面返回（页面栈深度变化或包含多级页面）
+    const pages = getCurrentPages();
+    const isReturningFromSubPage = pages.length >= 2; // 首页+至少一个二级页面
+
+    // 动态缓存时间：从二级页面返回时5秒，否则15秒
+    const dynamicCacheTTL = isReturningFromSubPage ? 5000 : 15000;
+
     // 如果有缓存且未过期，且没有待刷新的key，直接返回（除非强制刷新）
     const now = Date.now();
-    if (!forceRefresh && !hasStaleKeys && g.cachedDashboardData && (now - g.dashboardCacheTime) < 30000) {
-      console.log('[App] ✅ 使用缓存的dashboard数据');
+    if (!forceRefresh && !hasStaleKeys && g.cachedDashboardData && (now - g.dashboardCacheTime) < dynamicCacheTTL) {
+      console.log('[App] ✅ 使用缓存的dashboard数据', {
+        cacheAge: `${Math.round((now - g.dashboardCacheTime) / 1000)}s`,
+        ttl: `${dynamicCacheTTL / 1000}s`,
+        isReturningFromSubPage
+      });
       return g.cachedDashboardData;
+    }
+
+    if (g.cachedDashboardData && (now - g.dashboardCacheTime) >= dynamicCacheTTL) {
+      console.log('[App] ⏱️ Dashboard缓存已过期，重新获取', {
+        cacheAge: `${Math.round((now - g.dashboardCacheTime) / 1000)}s`,
+        ttl: `${dynamicCacheTTL / 1000}s`
+      });
     }
 
     // 如果正在请求中，等待同一个Promise
@@ -283,54 +345,58 @@ App({
           console.log('[App] 📦 Dashboard接口返回');
 
           // ================================================================
-          // 【核心】定向合并刷新策略：仅更新 staleKeys 中标记的项
-          // 非标记项从旧缓存保留（实现旧数据平滑过渡到新数据）
+          // 【核心】缓存更新策略：
+          // - forceRefresh / 首次加载 → 直接使用新响应（完全替换）
+          // - 普通刷新 → 定向合并（仅更新 staleKeys + 非空新数据）
           // ================================================================
           const prev = g.cachedDashboardData;
 
-          if (prev) {
-            // 复制一份旧数据，避免引用导致意外修改
-            const merged = { ...prev };
-
-            // 取出标记的 stale keys 并清空集合
+          // 【修复】forceRefresh 或首次加载时直接使用新响应，跳过合并逻辑
+          // 解决"空数组被锁定"问题：当用户主动刷新时应该看到最新数据
+          if (!prev) {
+            // 首次加载：无旧缓存
+            g._staleKeys.clear();
+            g.cachedDashboardData = res;
+            console.log('[App] ✅ 首次加载，直接缓存响应数据');
+          } else {
+            // 有旧缓存时的处理
             const stale = [...g._staleKeys];
             g._staleKeys.clear();
 
-            // 仅对标记的 key，用新响应覆盖旧缓存
-            for (const key of stale) {
-              if (res[key] !== undefined) {
-                merged[key] = res[key];
-                console.log('[App] 🔄 合并刷新:', key);
-              }
-            }
+            if (forceRefresh) {
+              // 【强制刷新】直接使用新响应（用户主动操作，信任后端数据）
+              g.cachedDashboardData = res;
+              console.log('[App] 🔄 强制刷新，已完全替换缓存');
+            } else {
+              // 【普通刷新】定向合并策略
+              const merged = { ...prev };
 
-            // 【兜底】如果某 stale key 在新响应中不存在（后端未返回该字段），
-            // 保留旧值不覆盖（平滑降级）
-            // 【兜底】即使新响应中某项为空数组/0，只要它被标记为 stale，
-            // 就说明二级页面已确认变更，信任新响应（不清除 stale 标记则相当于拒绝更新）
-
-            // 对于未被标记的 key，但新响应中明确返回了非空值，也更新（防止全量跳转遗漏）
-            // 这样兼顾了"定向刷新"的精确性和"全量刷新"的完整性
-            for (const key of Object.keys(res)) {
-              if (!stale.includes(key) && res[key] !== undefined && res[key] !== null) {
-                // 新响应中的非 stale 项如果是空数组/空对象，保留旧值（避免后端缓存过期导致的空白）
-                if (Array.isArray(res[key]) && res[key].length === 0 && Array.isArray(merged[key]) && merged[key].length > 0) {
-                  continue; // 保留旧数组
+              // 仅对标记的 key，用新响应覆盖旧缓存
+              for (const key of stale) {
+                if (res[key] !== undefined) {
+                  merged[key] = res[key];
+                  console.log('[App] 🔄 合并刷新:', key);
                 }
-                if (typeof res[key] === 'object' && !Array.isArray(res[key]) && res[key] !== null
-                    && Object.keys(res[key]).length === 0 && merged[key] && Object.keys(merged[key]).length > 0) {
-                  continue; // 保留旧对象
-                }
-                merged[key] = res[key];
               }
-            }
 
-            // 更新缓存
-            g.cachedDashboardData = merged;
-          } else {
-            // 没有旧缓存，直接使用新响应
-            g._staleKeys.clear();
-            g.cachedDashboardData = res;
+              // 对于未被标记的 key，但新响应中明确返回了非空值，也更新（防止全量跳转遗漏）
+              for (const key of Object.keys(res)) {
+                if (!stale.includes(key) && res[key] !== undefined && res[key] !== null) {
+                  // 新响应中的非 stale 项如果是空数组/空对象，保留旧值（避免后端临时异常）
+                  if (Array.isArray(res[key]) && res[key].length === 0 && Array.isArray(merged[key]) && merged[key].length > 0) {
+                    continue; // 保留旧数组
+                  }
+                  if (typeof res[key] === 'object' && !Array.isArray(res[key]) && res[key] !== null
+                      && Object.keys(res[key]).length === 0 && merged[key] && Object.keys(merged[key]).length > 0) {
+                    continue; // 保留旧对象
+                  }
+                  merged[key] = res[key];
+                }
+              }
+
+              g.cachedDashboardData = merged;
+              console.log(`[App] 📋 合并完成: stale=${stale.length}, total=${Object.keys(res).length}`);
+            }
           }
 
           g.dashboardCacheTime = Date.now();
@@ -579,7 +645,7 @@ App({
         console.log('[BLE] \u23F8\uFE0F 已在称重页，跳过');
         continue;
       }
-      
+
       // 只要数据新鲜且未处于跳转中，就跳转
       if (!this.globalData.scalePageNavigationInFlight) {
         this.checkAndNavigateToScalePage(finalData.weight);
