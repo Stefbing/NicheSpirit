@@ -23,13 +23,13 @@ dependencies = [
     "colorama",
     "pyjwt>=2.8.0",
     "bcrypt>=4.0.0",
-    "websockets>=13,<14",  # 13.x 兼容 uvicorn 的 legacy.handshake
+    "websockets>=13,<14",
     "redis>=5.0.0",
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"
 
-[tool.hatch.build.targets.wheel]
-packages = ["backend/app", "backend/static"]
+[tool.setuptools.packages.find]
+include = ["backend*"]

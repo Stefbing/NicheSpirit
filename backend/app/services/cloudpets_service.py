@@ -5,8 +5,8 @@ import asyncio
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 from sqlmodel import Session, select
-from ..models.db import engine
-from ..models.models import SystemConfig
+from backend.app.models.db import engine
+from backend.app.models.models import SystemConfig
 import time
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ REQUEST_TIMEOUT = 10.0
 COMMAND_PROCESS_DELAY = 1.0
 
 # 延迟导入，避免模块加载时的依赖问题
-from ..utils.config_manager import get_config_from_db
+from backend.app.utils.config_manager import get_config_from_db
 
 DEFAULT_HEADERS = {
     "lang": "zh_CN",
@@ -154,7 +154,7 @@ class CloudPetsService:
         使用标准化 key='token' + platform='cloudpets'"""
         try:
             token_key = self._token_cache_key()
-            from ..utils.redis_cache import redis_cache
+            from backend.app.utils.redis_cache import redis_cache
 
             # ---- 1. 检查 Redis 缓存 ----
             redis_token = await redis_cache.get(token_key)
@@ -232,7 +232,7 @@ class CloudPetsService:
 
             await loop.run_in_executor(None, _save_token)
             # 同步写入 Redis
-            from ..utils.redis_cache import redis_cache
+            from backend.app.utils.redis_cache import redis_cache
             await redis_cache.set(self._token_cache_key(), token, ttl=1800)
             logger.info("Saved new CloudPets token to database + Redis")
         except Exception as e:

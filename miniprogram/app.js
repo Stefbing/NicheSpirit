@@ -46,6 +46,9 @@ App({
     // 页面跳转锁
     scalePageNavigationInFlight: false,  // 防止重复跳转到称重页
     suppressScaleAutoNavigate: false,  // 绑定阶段抑制自动跳转
+
+    // 【防雪崩】缓存项定向刷新标记集合（刷新时不丢弃整个缓存）
+    _staleKeys: new Set(),
   },
 
   // 已发现的体脂秤设备列表（供绑定界面使用）
@@ -180,47 +183,96 @@ App({
   },
 
   /**
-   * 清除 Dashboard 缓存（登出/切换用户时调用）
+   * 清除 Dashboard 缓存（登出时使用，硬清除，无降级）
+   * 数据变更时请使用 refreshDashboardCache(keys) 替代此方法
    */
   clearDashboardCache() {
     this.globalData.cachedDashboardData = null;
     this.globalData.dashboardCacheTime = 0;
     this.globalData.dashboardFetching = false;
     this.globalData.dashboardFetchPromise = null;
-    console.log('[App] 🧹 Dashboard 缓存已清除（包括在途请求）');
+    this.globalData._staleKeys = new Set();
+    console.log('[App] 🧹 Dashboard 缓存已硬清除（仅登出场景使用）');
   },
 
   /**
-   * 获取Dashboard数据（带防重复请求 + 超时保护）
+   * 优雅刷新 Dashboard 缓存（替代 clearDashboardCache 暴力清除）
+   * 不清空现有缓存，仅标记指定 key 为"待刷新"。
+   * 下次 fetchDashboardData 会发起请求，成功后将新数据与旧缓存合并返回，
+   * 即使请求失败，旧数据依然可供首页正常渲染（平滑过渡）。
+   *
+   * @param {string[]} staleKeys - 需要刷新的缓存项 key 列表
+   *   可用 key: 'cloudpets_plans' | 'cloudpets_servings' | 'petkit_devices'
+   *            | 'scale_stats' | 'device_platforms' | 'xiaomi_config'
+   */
+  refreshDashboardCache(staleKeys = []) {
+    const g = this.globalData;
+    // 【核心】不置空 cachedDashboardData，保留旧数据供降级使用
+    g.dashboardCacheTime = 0;                // 使缓存过期，下次 fetch 会发请求
+    g.dashboardFetching = false;             // 重置请求锁
+    g.dashboardFetchPromise = null;          // 重置在途请求
+    // 记录需要定向刷新的 key
+    if (staleKeys.length > 0) {
+      staleKeys.forEach(k => g._staleKeys.add(k));
+      console.log('[App] 🔄 缓存标记为需刷新，待合并项:', staleKeys);
+    } else {
+      // 未指定 key 时，标记全部 key 为需刷新（兼容旧调用方）
+      const allKeys = ['cloudpets_plans', 'cloudpets_servings', 'petkit_devices',
+                       'scale_stats', 'device_platforms', 'xiaomi_config'];
+      allKeys.forEach(k => g._staleKeys.add(k));
+      console.log('[App] 🔄 缓存标记为需刷新（全部项）');
+    }
+  },
+
+  /**
+   * 获取Dashboard数据（带防重复请求 + 超时保护 + 定向合并刷新）
    * @param {number} userId - 用户ID
    * @param {number} timeout - 请求超时时间（默认 15s）
+   * @param {boolean} forceRefresh - 是否强制刷新（跳过30s缓存）
    * @returns {Promise} Dashboard数据
    */
-  async fetchDashboardData(userId, timeout = 15000) {
-    // 如果有缓存且未过期，直接返回
+  async fetchDashboardData(userId, timeout = 15000, forceRefresh = false) {
+    const g = this.globalData;
+    const hasStaleKeys = g._staleKeys && g._staleKeys.size > 0;
+
+    // 如果有缓存且未过期，且没有待刷新的key，直接返回（除非强制刷新）
     const now = Date.now();
-    if (this.globalData.cachedDashboardData && (now - this.globalData.dashboardCacheTime) < 30000) {
+    if (!forceRefresh && !hasStaleKeys && g.cachedDashboardData && (now - g.dashboardCacheTime) < 30000) {
       console.log('[App] ✅ 使用缓存的dashboard数据');
-      return this.globalData.cachedDashboardData;
+      return g.cachedDashboardData;
     }
 
     // 如果正在请求中，等待同一个Promise
-    if (this.globalData.dashboardFetching && this.globalData.dashboardFetchPromise) {
+    if (g.dashboardFetching && g.dashboardFetchPromise) {
       console.log('[App] ⏳ 等待已有的dashboard请求完成');
-      return this.globalData.dashboardFetchPromise;
+      return g.dashboardFetchPromise;
+    }
+
+    // 【防雪崩】当有 stale key 需要刷新时，给 dashboardCacheTime 加随机偏移，
+    // 让同一时间触发的大量刷新请求的后续自动刷新时间错开
+    if (hasStaleKeys) {
+      const jitter = Math.floor(Math.random() * 10000); // 0~10s 随机
+      g.dashboardCacheTime = now - 30000 + jitter;       // 使缓存处于"即将过期"而非"已过期"状态
+      console.log('[App] ⏳ 处理 %d 个待刷新项，添加 %dms 防雪崩偏移', g._staleKeys.size, jitter);
     }
 
     // 设置请求锁
-    this.globalData.dashboardFetching = true;
+    g.dashboardFetching = true;
 
     // 创建带超时保护的请求 Promise
-    this.globalData.dashboardFetchPromise = new Promise((resolve, reject) => {
+    g.dashboardFetchPromise = new Promise((resolve, reject) => {
       // 超时定时器
       const timeoutId = setTimeout(() => {
         console.error('[App] ❌ Dashboard 请求超时');
-        this.globalData.dashboardFetching = false;
-        this.globalData.dashboardFetchPromise = null;
-        reject(new Error('Dashboard 请求超时'));
+        g.dashboardFetching = false;
+        g.dashboardFetchPromise = null;
+        // 超时时不丢弃旧缓存，首页仍可展示旧数据而非空
+        const fallback = g.cachedDashboardData;
+        if (fallback) {
+          resolve(fallback);
+        } else {
+          reject(new Error('Dashboard 请求超时'));
+        }
       }, timeout);
 
       cloudRequest.callContainer({
@@ -230,32 +282,86 @@ App({
           clearTimeout(timeoutId);
           console.log('[App] 📦 Dashboard接口返回');
 
-          // 缓存数据
-          this.globalData.cachedDashboardData = res;
-          this.globalData.dashboardCacheTime = Date.now();
+          // ================================================================
+          // 【核心】定向合并刷新策略：仅更新 staleKeys 中标记的项
+          // 非标记项从旧缓存保留（实现旧数据平滑过渡到新数据）
+          // ================================================================
+          const prev = g.cachedDashboardData;
 
-          // 释放锁
-          this.globalData.dashboardFetching = false;
-          this.globalData.dashboardFetchPromise = null;
+          if (prev) {
+            // 复制一份旧数据，避免引用导致意外修改
+            const merged = { ...prev };
 
-          resolve(res);
+            // 取出标记的 stale keys 并清空集合
+            const stale = [...g._staleKeys];
+            g._staleKeys.clear();
+
+            // 仅对标记的 key，用新响应覆盖旧缓存
+            for (const key of stale) {
+              if (res[key] !== undefined) {
+                merged[key] = res[key];
+                console.log('[App] 🔄 合并刷新:', key);
+              }
+            }
+
+            // 【兜底】如果某 stale key 在新响应中不存在（后端未返回该字段），
+            // 保留旧值不覆盖（平滑降级）
+            // 【兜底】即使新响应中某项为空数组/0，只要它被标记为 stale，
+            // 就说明二级页面已确认变更，信任新响应（不清除 stale 标记则相当于拒绝更新）
+
+            // 对于未被标记的 key，但新响应中明确返回了非空值，也更新（防止全量跳转遗漏）
+            // 这样兼顾了"定向刷新"的精确性和"全量刷新"的完整性
+            for (const key of Object.keys(res)) {
+              if (!stale.includes(key) && res[key] !== undefined && res[key] !== null) {
+                // 新响应中的非 stale 项如果是空数组/空对象，保留旧值（避免后端缓存过期导致的空白）
+                if (Array.isArray(res[key]) && res[key].length === 0 && Array.isArray(merged[key]) && merged[key].length > 0) {
+                  continue; // 保留旧数组
+                }
+                if (typeof res[key] === 'object' && !Array.isArray(res[key]) && res[key] !== null
+                    && Object.keys(res[key]).length === 0 && merged[key] && Object.keys(merged[key]).length > 0) {
+                  continue; // 保留旧对象
+                }
+                merged[key] = res[key];
+              }
+            }
+
+            // 更新缓存
+            g.cachedDashboardData = merged;
+          } else {
+            // 没有旧缓存，直接使用新响应
+            g._staleKeys.clear();
+            g.cachedDashboardData = res;
+          }
+
+          g.dashboardCacheTime = Date.now();
+          g.dashboardFetching = false;
+          g.dashboardFetchPromise = null;
+
+          resolve(g.cachedDashboardData);
         },
         fail: (err) => {
           clearTimeout(timeoutId);
           console.error('[App] ❌ Dashboard接口失败:', err);
 
-          // 释放锁并清除缓存
-          this.globalData.dashboardFetching = false;
-          this.globalData.dashboardFetchPromise = null;
-          this.globalData.cachedDashboardData = null;
-          this.globalData.dashboardCacheTime = 0;
-
-          reject(err);
+          // 【修复】失败时不丢弃旧缓存，返回缓存数据兜底
+          const fallback = g.cachedDashboardData;
+          if (fallback) {
+            console.log('[App] 📦 使用旧缓存数据兜底，保留 %d 个待刷新项', g._staleKeys.size);
+            g.dashboardFetching = false;
+            g.dashboardFetchPromise = null;
+            resolve(fallback);
+          } else {
+            g.dashboardFetching = false;
+            g.dashboardFetchPromise = null;
+            g.cachedDashboardData = null;
+            g.dashboardCacheTime = 0;
+            reject(err);
+          }
         }
       });
     });
 
-    return this.globalData.dashboardFetchPromise;
+    return g.dashboardFetchPromise;
   },
 
   async checkAndInitBluetooth(userId) {

@@ -8,9 +8,9 @@ import asyncio
 from typing import Optional, Dict, List, Any
 from dataclasses import dataclass
 from sqlmodel import Session, select
-from ..models.db import engine
-from ..models.models import SystemConfig
-from .config_encryptor import ConfigEncryptor
+from backend.app.models.db import engine
+from backend.app.models.models import SystemConfig
+from backend.app.utils.config_encryptor import ConfigEncryptor
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ class DeviceRecord:
     platform: str
     device_name: str
     is_ble: bool = False
+    is_shared: bool = False  # True=通过分享获取的设备
     account: str = ''
     password: str = ''
     token: str = ''
@@ -62,7 +63,7 @@ class DeviceCacheManager:
 
     async def load_all(self):
         """系统启动时全量加载所有活跃设备到 Redis"""
-        from .redis_cache import redis_cache
+        from backend.app.utils.redis_cache import redis_cache
 
         def _load():
             with Session(engine) as session:
@@ -132,7 +133,7 @@ class DeviceCacheManager:
         获取用户的设备平台映射。
         首次调用或缓存失效时从 DB 重建。
         """
-        from .redis_cache import redis_cache
+        from backend.app.utils.redis_cache import redis_cache
 
         data = await redis_cache.get(self.DEVICE_CACHE_KEY)
         if data is None:
@@ -158,7 +159,7 @@ class DeviceCacheManager:
 
     async def _load_user_from_db(self, user_id: int):
         """从数据库加载单个用户的设备到 Redis"""
-        from .redis_cache import redis_cache
+        from backend.app.utils.redis_cache import redis_cache
 
         def _load():
             with Session(engine) as session:
@@ -185,7 +186,7 @@ class DeviceCacheManager:
 
     async def invalidate_user(self, user_id: int):
         """用户设备变更后清除缓存，下次查询时自动重载"""
-        from .redis_cache import redis_cache
+        from backend.app.utils.redis_cache import redis_cache
         data = await redis_cache.get(self.DEVICE_CACHE_KEY)
         if data:
             data.pop(str(user_id), None)
@@ -193,7 +194,7 @@ class DeviceCacheManager:
 
     async def invalidate_platform(self, user_id: int, platform: str):
         """清除单个用户单个平台的缓存"""
-        from .redis_cache import redis_cache
+        from backend.app.utils.redis_cache import redis_cache
         data = await redis_cache.get(self.DEVICE_CACHE_KEY)
         if data and str(user_id) in data:
             data[str(user_id)].pop(platform, None)
@@ -201,14 +202,14 @@ class DeviceCacheManager:
 
     async def invalidate_all(self):
         """清空全部缓存"""
-        from .redis_cache import redis_cache
+        from backend.app.utils.redis_cache import redis_cache
         await redis_cache.delete(self.DEVICE_CACHE_KEY)
         self._loaded = False
 
     # ==================== 统计 ====================
 
     async def stats(self) -> Dict[str, Any]:
-        from .redis_cache import redis_cache
+        from backend.app.utils.redis_cache import redis_cache
         data = await redis_cache.get(self.DEVICE_CACHE_KEY) or {}
         total_users = len(data)
         total_platforms = sum(len(plats) for plats in data.values())

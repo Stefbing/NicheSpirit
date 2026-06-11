@@ -1,13 +1,22 @@
 {
   "description": "项目配置文件",
   "packOptions": {
-    "ignore": [],
+    "ignore": [
+      {
+        "type": "folder",
+        "value": "miniprogramLog"
+      },
+      {
+        "type": "file",
+        "value": "*.log"
+      }
+    ],
     "include": []
   },
   "setting": {
     "bundle": false,
     "userConfirmedBundleSwitch": false,
-    "urlCheck": true,
+    "urlCheck": false,
     "scopeDataCheck": false,
     "coverView": true,
     "es6": true,

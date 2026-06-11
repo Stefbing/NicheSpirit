@@ -130,9 +130,15 @@ Page({
   // ======================
   // 生命周期
   // ======================
+  /** 统一订阅蓝牙数据（可在 onLoad / onShow 中安全调用） */
+  subscribeScaleData() {
+    if (this.unsubscribe) return;
+    this.unsubscribe = getApp().subscribeScaleData(this.handleScaleData.bind(this));
+  },
+
   onLoad(options) {
     // 订阅蓝牙数据流（发布-订阅模式）
-    this.unsubscribe = getApp().subscribeScaleData(this.handleScaleData.bind(this));
+    this.subscribeScaleData();
 
     // 加载成员数据（优先使用全局预加载的）
     _membersLoadPromise = this.loadMembers();
@@ -143,34 +149,41 @@ Page({
     wx.hideShareMenu({ menus: ['share', 'shareTimeline'] });
     console.log('[Scale] 📄 页面显示');
 
-    // 【关键】页面重新显示时，完全重置到初始状态
-    this.setData({
-      scalePageCompleted: false,
-      weight: 0,
-      weightDisplay: '0.00',
-      impedance: 0,
-      isStabilized: false,
-      appState: APP_STATE.IDLE,
-      stabilityProgress: 0,
-      weightHistory: [],
-      measurementLocked: false,
-      lockedWeight: null,
-      lockedImpedance: null,
-      needleAngle: -90,
-      statusPillText: '准备就绪'
-    });
+    // 【修复】息屏后重新显示时，恢复蓝牙数据订阅（onHide中会被取消）
+    this.subscribeScaleData();
+
+    // 【修复】息屏后不重置测量数据：如果已有测量结果，保持显示
+    if (this.data.appState === APP_STATE.COMPLETED && this.data.measurementLocked) {
+      console.log('[Scale] ✅ 保留已完成测量状态（屏幕唤醒）');
+      this.checkBLEState();
+      this.syncDeviceOnlineStatus();
+      return;
+    }
+
+    // 只有空闲或测量中状态才重置（非息屏后的正常页面显示）
+    if (this.data.appState !== APP_STATE.COMPLETED) {
+      this.setData({
+        scalePageCompleted: false,
+        weight: 0,
+        weightDisplay: '0.00',
+        impedance: 0,
+        isStabilized: false,
+        appState: APP_STATE.IDLE,
+        stabilityProgress: 0,
+        weightHistory: [],
+        measurementLocked: false,
+        lockedWeight: null,
+        lockedImpedance: null,
+        needleAngle: -90,
+        statusPillText: '准备就绪'
+      });
+    }
 
     // 检查蓝牙状态
     this.checkBLEState();
 
     // 同步设备在线状态
     this.syncDeviceOnlineStatus();
-
-    // 注意：不再自动处理旧数据，等待新的蓝牙广播
-    // const latestData = getApp().globalData.latestScaleData;
-    // if (latestData && latestData.weight >= CONFIG.MIN_VALID_WEIGHT) {
-    //   this.handleScaleData(latestData);
-    // }
   },
 
   onHide() {
@@ -1149,13 +1162,12 @@ Page({
           duration: 1500
         });
 
-        // 清除 dashboard 缓存，确保首页能看到最新数据
+        // 优雅刷新首页缓存（仅标记 scale_stats 为需刷新）
         const app = getApp();
         const userInfo = wx.getStorageSync('userInfo');
         if (userInfo && userInfo.user_id) {
-          console.log('[Scale] 🗑️ 清除 dashboard 缓存');
-          app.globalData.cachedDashboardData = null;
-          app.globalData.dashboardCacheTime = 0;
+          console.log('[Scale] 🔄 标记 scale_stats 缓存需刷新');
+          app.refreshDashboardCache(['scale_stats']);
         }
       }
     } catch (err) {

@@ -6,9 +6,19 @@
 import json
 import logging
 import os
+import random
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# 【防雪崩】最大 jitter 比例：TTL * 20% 的随机偏移，将过期时间打散
+_JITTER_RATIO = 0.2
+
+
+def _with_jitter(ttl: int) -> int:
+    """为 TTL 添加随机偏移，防止大量 Key 同时过期"""
+    offset = random.randint(0, max(1, int(ttl * _JITTER_RATIO)))
+    return ttl + offset
 
 
 class RedisCache:
@@ -57,11 +67,17 @@ class RedisCache:
         return None
 
     async def set(self, key: str, value: Any, ttl: int = 300):
+        """
+        设置 Redis 缓存（带 TTL 随机 jitter 防雪崩）
+        - ttl: 基准过期秒数
+        - 实际 TTL = ttl + random(0, ttl * 20%)
+        """
         if not self._connected or not self._redis:
             return
         try:
             serialized = json.dumps(value, ensure_ascii=False, default=str)
-            await self._redis.setex(key, ttl, serialized)
+            actual_ttl = _with_jitter(ttl)
+            await self._redis.setex(key, actual_ttl, serialized)
         except Exception as e:
             logger.warning(f"Redis set({key}) 失败: {e}")
 

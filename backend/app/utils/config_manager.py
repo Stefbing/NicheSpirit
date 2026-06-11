@@ -7,9 +7,9 @@ import asyncio
 from typing import Optional, List, Dict, Any, Callable, TypeVar, Tuple
 from sqlmodel import Session, select
 from sqlalchemy import or_
-from ..models.db import engine
-from ..models.models import SystemConfig
-from .config_encryptor import ConfigEncryptor
+from backend.app.models.db import engine
+from backend.app.models.models import SystemConfig
+from backend.app.utils.config_encryptor import ConfigEncryptor
 
 logger = logging.getLogger(__name__)
 
@@ -483,7 +483,7 @@ async def get_shared_devices_for_user(user_id: int) -> List[Dict[str, Any]]:
     """
     def _get_shared() -> List[Dict[str, Any]]:
         with Session(engine) as session:
-            from ..models.models import SharedDeviceConfig, DeviceShare, SystemConfig
+            from backend.app.models.models import SharedDeviceConfig, DeviceShare, SystemConfig
 
             # 查询该用户收到的所有有效分享
             shares = session.exec(
@@ -522,7 +522,7 @@ async def get_shared_devices_for_user(user_id: int) -> List[Dict[str, Any]]:
                     if plat not in from_creds:
                         from_creds[plat] = {}
                     if cfg.is_encrypted:
-                        from ..utils.config_encryptor import ConfigEncryptor
+                        from backend.app.utils.config_encryptor import ConfigEncryptor
                         from_creds[plat][cfg.key] = ConfigEncryptor.decrypt(cfg.value)
                     else:
                         from_creds[plat][cfg.key] = cfg.value

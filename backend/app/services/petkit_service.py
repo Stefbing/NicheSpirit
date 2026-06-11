@@ -10,8 +10,8 @@ import json
 import time
 import re
 from sqlmodel import Session, select
-from ..models.db import engine
-from ..models.models import SystemConfig
+from backend.app.models.db import engine
+from backend.app.models.models import SystemConfig
 from typing import Optional, Dict, Any, List
 
 logging.basicConfig(level=logging.INFO)
@@ -48,14 +48,14 @@ class PetKitService:
     async def _get_credentials(self):
         """异步获取凭证，避免阻塞 __init__"""
         if not self.username or not self.password:
-            from ..utils.config_manager import get_config_from_db
+            from backend.app.utils.config_manager import get_config_from_db
             self.username = await get_config_from_db("account", user_id=self.user_id, platform="petkit")
             self.password = await get_config_from_db("password", user_id=self.user_id, platform="petkit")
 
     async def _init_ssl_context(self):
         """初始化 SSL 上下文，处理证书验证问题"""
         try:
-            from ..utils.config_manager import get_config_from_db
+            from backend.app.utils.config_manager import get_config_from_db
             disable_ssl_str = await get_config_from_db("PETKIT_DISABLE_SSL_VERIFY")
             disable_ssl = disable_ssl_str.lower() == "true" if disable_ssl_str else False
 
@@ -72,7 +72,7 @@ class PetKitService:
     async def _save_disable_ssl_config(self):
         """【修复】SSL降级成功后持久化到DB，避免下次启动重试"""
         try:
-            from ..utils.config_manager import set_config_to_db
+            from backend.app.utils.config_manager import set_config_to_db
             await set_config_to_db("PETKIT_DISABLE_SSL_VERIFY", user_id=0, value="true", platform="petkit")
             logger.info("Persisted PETKIT_DISABLE_SSL_VERIFY=true to DB (won't retry SSL on next startup)")
         except Exception as e:
@@ -113,7 +113,7 @@ class PetKitService:
         使用标准化 key='token' + platform='petkit'"""
         try:
             session_key = self._session_cache_key()
-            from ..utils.redis_cache import redis_cache
+            from backend.app.utils.redis_cache import redis_cache
 
             # ---- 1. 检查 Redis 缓存 ----
             redis_data = await redis_cache.get(session_key)
@@ -248,7 +248,7 @@ class PetKitService:
 
             await loop.run_in_executor(None, _save)
             # 同步写入 Redis
-            from ..utils.redis_cache import redis_cache
+            from backend.app.utils.redis_cache import redis_cache
             await redis_cache.set(self._session_cache_key(), session_data, ttl=1800)
             logger.info("Saved PetKit session to database + Redis")
         except Exception as e:

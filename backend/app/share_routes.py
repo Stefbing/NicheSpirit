@@ -1,22 +1,28 @@
 """设备分享 API 路由"""
 import json, time, uuid, hashlib, logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
 
-from .models.models import User, DeviceShare, SharedDeviceConfig, SystemConfig
-from .models.db import get_session
+from backend.app.models.models import User, DeviceShare, SharedDeviceConfig, SystemConfig
+from backend.app.models.db import get_session
+
+# 【惰性导入】避免与 main.py 的 from share_routes import router 形成循环导入
+async def _get_current_user(authorization: Optional[str] = Header(None)):
+    from backend.app.main import get_current_user
+    return await get_current_user(authorization)
+
 
 router = APIRouter(prefix="/api/share", tags=["share"])
 
 # ──── Request / Response Models ────
 
 class CreateShareRequest(BaseModel):
-    from_user_id: int
     device_keys: list[str]
+    # 【权限修复】from_user_id 不再从请求体获取，由 token 认证决定
 
 class CreateShareResponse(BaseModel):
     share_id: int
@@ -27,15 +33,15 @@ class CreateShareResponse(BaseModel):
 
 class AcceptShareRequest(BaseModel):
     share_token: str
-    to_user_id: int
+    # 【权限修复】to_user_id 不再从请求体获取，由 token 认证决定
 
 class UpdateExpiryRequest(BaseModel):
     share_id: int
-    user_id: int          # 分享者（权限校验）
     expire_hours: int     # 新的有效时长（小时），从 accepted_at 开始计算
+    # 【权限修复】user_id 不再从请求体获取，由 token 认证决定
 
 class CheckExpiredRequest(BaseModel):
-    user_id: int          # 指定用户，0=检查所有
+    user_id: int = 0      # 指定用户，0=检查所有
 
 # ──── 辅助函数 ────
 
@@ -68,10 +74,10 @@ def _get_device_configs_by_platforms(session: Session, user_id: int, platforms: 
         if plat not in result:
             result[plat] = {"account": "", "password": ""}
         if cfg.key == "account":
-            from .utils.config_encryptor import ConfigEncryptor
+            from backend.app.utils.config_encryptor import ConfigEncryptor
             result[plat]["account"] = ConfigEncryptor.decrypt(cfg.value) if cfg.is_encrypted else cfg.value
         elif cfg.key == "password":
-            from .utils.config_encryptor import ConfigEncryptor
+            from backend.app.utils.config_encryptor import ConfigEncryptor
             result[plat]["password"] = ConfigEncryptor.decrypt(cfg.value) if cfg.is_encrypted else cfg.value
     return result
 
@@ -93,11 +99,9 @@ def _format_share_output(s: DeviceShare) -> dict:
 # ──── API Endpoints ────
 
 @router.post("/create", response_model=CreateShareResponse)
-async def create_share(request: CreateShareRequest, session: Session = Depends(get_session)):
-    """用户A创建分享 - 默认24小时有效期"""
-    user = session.get(User, request.from_user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="分享者不存在")
+async def create_share(request: CreateShareRequest, current_user: User = Depends(_get_current_user), session: Session = Depends(get_session)):
+    """当前用户创建分享 - 默认24小时有效期"""
+    user_id = current_user.id
     if not request.device_keys:
         raise HTTPException(status_code=400, detail="请选择要分享的设备")
 
@@ -105,7 +109,7 @@ async def create_share(request: CreateShareRequest, session: Session = Depends(g
     token = _generate_token()
 
     share = DeviceShare(
-        from_user_id=request.from_user_id,
+        from_user_id=user_id,
         share_token=token,
         status="pending",
         device_keys=json.dumps(request.device_keys),
@@ -126,12 +130,14 @@ async def create_share(request: CreateShareRequest, session: Session = Depends(g
 
 
 @router.post("/accept")
-async def accept_share(request: AcceptShareRequest, session: Session = Depends(get_session)):
+async def accept_share(request: AcceptShareRequest, current_user: User = Depends(_get_current_user), session: Session = Depends(get_session)):
     """
-    用户B接受分享
+    当前用户接受分享
     - 检查链接是否过期（created_at + 24h）
     - 接受后 expires_at 重置为 accepted_at + 24h（设备可用时效）
     """
+    to_user_id = current_user.id
+
     share = session.exec(
         select(DeviceShare).where(
             DeviceShare.share_token == request.share_token,
@@ -151,17 +157,14 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
         session.commit()
         raise HTTPException(status_code=400, detail="分享链接已过期")
 
-    to_user = session.get(User, request.to_user_id)
-    if not to_user:
-        raise HTTPException(status_code=404, detail="接受者用户不存在")
-    if share.from_user_id == request.to_user_id:
+    if share.from_user_id == to_user_id:
         raise HTTPException(status_code=400, detail="不能接受自己的分享")
 
     device_keys = json.loads(share.device_keys)
     platforms = _parse_device_keys(device_keys)
     from_configs = _get_device_configs_by_platforms(session, share.from_user_id, platforms)
 
-    logger.info(f'[AcceptShare] token={request.share_token} from={share.from_user_id} to={request.to_user_id} '
+    logger.info(f'[AcceptShare] token={request.share_token} from={share.from_user_id} to={to_user_id} '
                 f'platforms={platforms} from_configs={list(from_configs.keys())}')
 
     created_configs = []
@@ -172,7 +175,7 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
         if not creds["account"] or not creds["password"]:
             continue
 
-        shared_account = f"{creds['account']}_shared_{request.to_user_id}"
+        shared_account = f"{creds['account']}_shared_{to_user_id}"
 
         for dk in device_keys:
             # 只创建匹配当前平台的 device_key 记录
@@ -181,7 +184,7 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
                 continue
             sc = SharedDeviceConfig(
                 share_id=share.id,
-                to_user_id=request.to_user_id,
+                to_user_id=to_user_id,
                 platform=platform,
                 device_key=dk,
                 config_account=shared_account,
@@ -202,7 +205,7 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
                 continue
             sc = SharedDeviceConfig(
                 share_id=share.id,
-                to_user_id=request.to_user_id,
+                to_user_id=to_user_id,
                 platform=bp,
                 device_key=dk,
                 config_account='shared_ble',
@@ -213,7 +216,7 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
             created_configs.append({"device_key": dk, "platform": bp})
 
     # 更新分享记录：接受后将 expires_at 设为设备可用时效（accepted_at + 24h）
-    share.to_user_id = request.to_user_id
+    share.to_user_id = to_user_id
     share.status = "accepted"
     share.accepted_at = now_ms
     share.expires_at = now_ms + DEFAULT_DURATION_HOURS * 3600 * 1000
@@ -225,15 +228,47 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
                 f'to_user={share.to_user_id} configs_created={len(created_configs)} '
                 f'configs={created_configs}')
 
+    # ── 缓存预热：将分享者的缓存数据复制到接收者 ──
+    # 使 B 无需调用第三方 API 即可查看设备数据
+    try:
+        from backend.app.utils.redis_cache import redis_cache
+        from_user_id = share.from_user_id
+        for platform in platforms:
+            if platform == "petkit":
+                src = await redis_cache.get(f"user_{from_user_id}_petkit_devices")
+                if src:
+                    await redis_cache.set(f"user_{to_user_id}_petkit_devices", src, ttl=300)
+                src2 = await redis_cache.get(f"user_{from_user_id}_petkit_devices_with_stats")
+                if src2:
+                    await redis_cache.set(f"user_{to_user_id}_petkit_devices_with_stats", src2, ttl=60)
+                # 同步 PetKit 统计缓存
+                if isinstance(src, list):
+                    for dev in src:
+                        did = dev.get('id') if isinstance(dev, dict) else ''
+                        if did:
+                            s = await redis_cache.get(f"user_{from_user_id}_petkit_stats_{did}")
+                            if s:
+                                await redis_cache.set(f"user_{to_user_id}_petkit_stats_{did}", s, ttl=180)
+            elif platform == "cloudpets":
+                sv = await redis_cache.get(f"user_{from_user_id}_cloudpets_servings")
+                if sv:
+                    await redis_cache.set(f"user_{to_user_id}_cloudpets_servings", sv, ttl=120)
+                pl = await redis_cache.get(f"user_{from_user_id}_cloudpets_plans")
+                if pl:
+                    await redis_cache.set(f"user_{to_user_id}_cloudpets_plans", pl, ttl=300)
+        logger.info(f"[ShareAccept] 缓存预热完成: from={from_user_id}, to={to_user_id}, platforms={platforms}")
+    except Exception as e:
+        logger.warning(f"[ShareAccept] 缓存预热失败（非致命）: {e}")
+
     # 清除接受者的设备缓存 + 共享凭据缓存
     try:
-        from .utils.device_cache import device_cache
-        await device_cache.invalidate_user(request.to_user_id)
+        from backend.app.utils.device_cache import device_cache
+        await device_cache.invalidate_user(to_user_id)
     except Exception:
         pass
     try:
-        from .utils.redis_cache import redis_cache
-        await redis_cache.delete(f"shared_creds:user_{request.to_user_id}")
+        from backend.app.utils.redis_cache import redis_cache
+        await redis_cache.delete(f"shared_creds:user_{to_user_id}")
     except Exception:
         pass
 
@@ -246,11 +281,12 @@ async def accept_share(request: AcceptShareRequest, session: Session = Depends(g
 
 
 @router.get("/manage-list")
-async def manage_shares(user_id: int, session: Session = Depends(get_session)):
+async def manage_shares(current_user: User = Depends(_get_current_user), session: Session = Depends(get_session)):
     """
-    获取分享者（A）的分享管理列表
+    获取当前分享者的分享管理列表
     含被分享者昵称、各平台名称、剩余有效时长
     """
+    user_id = current_user.id
     shares = session.exec(
         select(DeviceShare).where(
             DeviceShare.from_user_id == user_id
@@ -284,17 +320,18 @@ async def manage_shares(user_id: int, session: Session = Depends(get_session)):
 
 
 @router.post("/update-expiry")
-async def update_share_expiry(request: UpdateExpiryRequest, session: Session = Depends(get_session)):
+async def update_share_expiry(request: UpdateExpiryRequest, current_user: User = Depends(_get_current_user), session: Session = Depends(get_session)):
     """
-    分享者（A）修改已接受分享的设备可用时效
+    当前用户（分享者）修改已接受分享的设备可用时效
     """
+    user_id = current_user.id
     if request.expire_hours < 1 or request.expire_hours > 720:  # 1h ~ 30天
         raise HTTPException(status_code=400, detail="有效时长为 1~720 小时（30天）")
 
     share = session.get(DeviceShare, request.share_id)
     if not share:
         raise HTTPException(status_code=404, detail="分享记录不存在")
-    if share.from_user_id != request.user_id:
+    if share.from_user_id != user_id:
         raise HTTPException(status_code=403, detail="仅分享者可修改时效")
     if share.status != "accepted":
         raise HTTPException(status_code=400, detail="仅已接受的分享可修改时效")
@@ -313,9 +350,9 @@ async def update_share_expiry(request: UpdateExpiryRequest, session: Session = D
         # 清除被分享者缓存
         if share.to_user_id:
             try:
-                from .utils.device_cache import device_cache
+                from backend.app.utils.device_cache import device_cache
                 await device_cache.invalidate_user(share.to_user_id)
-                from .utils.redis_cache import redis_cache
+                from backend.app.utils.redis_cache import redis_cache
                 await redis_cache.delete(f"shared_creds:user_{share.to_user_id}")
             except Exception:
                 pass
@@ -333,9 +370,9 @@ async def update_share_expiry(request: UpdateExpiryRequest, session: Session = D
     # 清除被分享者缓存
     if share.to_user_id:
         try:
-            from .utils.device_cache import device_cache
+            from backend.app.utils.device_cache import device_cache
             await device_cache.invalidate_user(share.to_user_id)
-            from .utils.redis_cache import redis_cache
+            from backend.app.utils.redis_cache import redis_cache
             await redis_cache.delete(f"shared_creds:user_{share.to_user_id}")
         except Exception:
             pass
@@ -349,18 +386,19 @@ async def update_share_expiry(request: UpdateExpiryRequest, session: Session = D
 
 
 @router.post("/check-expired")
-async def check_expired_shares(request: CheckExpiredRequest, session: Session = Depends(get_session)):
+async def check_expired_shares(request: CheckExpiredRequest, current_user: User = Depends(_get_current_user), session: Session = Depends(get_session)):
     """
     扫描并自动撤销已过期的分享（后台定时任务调用）
-    user_id=0 表示扫描所有用户
+    user_id=0 表示扫描所有用户，否则仅扫描当前用户
     """
     now_ms = int(time.time() * 1000)
     query = select(DeviceShare).where(
         DeviceShare.status.in_(["accepted", "pending"]),
         DeviceShare.expires_at <= now_ms,
     )
-    if request.user_id > 0:
-        query = query.where(DeviceShare.from_user_id == request.user_id)
+    uid = request.user_id if request.user_id > 0 else current_user.id
+    if uid > 0:
+        query = query.where(DeviceShare.from_user_id == uid)
 
     expired = session.exec(query).all()
     if not expired:
@@ -379,8 +417,8 @@ async def check_expired_shares(request: CheckExpiredRequest, session: Session = 
 
     # 清除所有受影响的被分享者缓存
     try:
-        from .utils.device_cache import device_cache
-        from .utils.redis_cache import redis_cache
+        from backend.app.utils.device_cache import device_cache
+        from backend.app.utils.redis_cache import redis_cache
         for uid in to_users:
             await device_cache.invalidate_user(uid)
             await redis_cache.delete(f"shared_creds:user_{uid}")
@@ -396,8 +434,9 @@ async def check_expired_shares(request: CheckExpiredRequest, session: Session = 
 
 
 @router.get("/list")
-async def list_shares(user_id: int, role: str = "from", session: Session = Depends(get_session)):
-    """查询分享记录（兼容旧版）"""
+async def list_shares(role: str = "from", current_user: User = Depends(_get_current_user), session: Session = Depends(get_session)):
+    """查询当前用户的分享记录"""
+    user_id = current_user.id
     if role == "from":
         shares = session.exec(
             select(DeviceShare).where(
@@ -446,8 +485,9 @@ async def pending_share_from_user(from_user_id: int, session: Session = Depends(
 
 
 @router.post("/revoke")
-async def revoke_share(share_id: int, user_id: int, session: Session = Depends(get_session)):
-    """分享者撤销分享"""
+async def revoke_share(share_id: int, current_user: User = Depends(_get_current_user), session: Session = Depends(get_session)):
+    """当前用户撤销分享（仅限自己的分享）"""
+    user_id = current_user.id
     share = session.get(DeviceShare, share_id)
     if not share or share.from_user_id != user_id:
         raise HTTPException(status_code=404, detail="分享记录不存在")
@@ -458,12 +498,12 @@ async def revoke_share(share_id: int, user_id: int, session: Session = Depends(g
 
     if share.to_user_id:
         try:
-            from .utils.device_cache import device_cache
+            from backend.app.utils.device_cache import device_cache
             await device_cache.invalidate_user(share.to_user_id)
         except Exception:
             pass
         try:
-            from .utils.redis_cache import redis_cache
+            from backend.app.utils.redis_cache import redis_cache
             await redis_cache.delete(f"shared_creds:user_{share.to_user_id}")
         except Exception:
             pass

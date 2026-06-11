@@ -198,7 +198,7 @@ Page({
   },
   
   // 加载用户设备列表
-  async loadUserDevices() {
+  async loadUserDevices(forceRefresh = false) {
     if (!this.data.userInfo || !this.data.userInfo.user_id) return
     
     // 防止重复请求
@@ -212,7 +212,7 @@ Page({
     try {
       // 使用app.js中统一的fetchDashboardData方法（防重复请求）
       const app = getApp()
-      const dashboardData = await app.fetchDashboardData(this.data.userInfo.user_id)
+      const dashboardData = await app.fetchDashboardData(this.data.userInfo.user_id, 15000, forceRefresh)
       
       console.log('[首页] 📦 获取到dashboard数据')
       console.log('[首页] 🔍 xiaomi_config:', dashboardData.xiaomi_config)
@@ -445,10 +445,16 @@ Page({
       wx.showToast({ title: '添加成功', icon: 'success' })
       
       this.closeDeviceConfigModal()
-      // 清除缓存及在途请求，强制刷新
+      // 【修复】优雅刷新缓存（标记设备/云平台/体脂秤为需刷新）
       const app = getApp()
-      app.clearDashboardCache()
-      await this.loadUserDevices()
+      app.refreshDashboardCache([
+        'device_platforms', 'cloudpets_plans', 'cloudpets_servings',
+        'petkit_devices', 'xiaomi_config', 'scale_stats'
+      ])
+      // 重置加载锁，确保 loadUserDevices 能发起新请求
+      this.isLoadingDevices = false
+      this.devicesLoaded = false
+      await this.loadUserDevices(true)
     } catch (err) {
       wx.hideLoading()
       console.error('添加设备失败:', err)
@@ -568,14 +574,21 @@ Page({
     }, 10000)
   },
 
-  // 过滤已发现的设备（剔除已绑定的）—— 已绑定ID缓存5秒避免高频请求
+  // 过滤已发现的设备（剔除已绑定的）—— 已绑定ID缓存30秒避免高频请求
   _boundDeviceCache: { ids: [], time: 0 },
+  _boundCheckInProgress: false,
 
   async _getBoundDeviceIds(userId) {
     const now = Date.now()
-    if (this._boundDeviceCache && (now - this._boundDeviceCache.time < 5000)) {
+    // 【修复】延长缓存时间从5s到30s，减少扫描期间的后端调用频率
+    if (this._boundDeviceCache && (now - this._boundDeviceCache.time < 30000)) {
       return this._boundDeviceCache.ids
     }
+    // 【修复】防并发：如果已有请求在进行中，返回上次缓存值
+    if (this._boundCheckInProgress) {
+      return this._boundDeviceCache.ids
+    }
+    this._boundCheckInProgress = true
     let boundIds = []
     try {
       const boundRes = await cloudRequest.callContainer({
@@ -589,6 +602,7 @@ Page({
       console.warn('[绑定] 获取已绑定设备ID失败:', e)
     }
     this._boundDeviceCache = { ids: boundIds, time: now }
+    this._boundCheckInProgress = false
     return boundIds
   },
 
@@ -647,10 +661,13 @@ Page({
       // 关闭弹窗（保留 suppress 标记 2 秒，避免 BLE 立即跳转称重页覆盖提示）
       this.setData({ showScaleScanningDialog: false })
 
-      // 刷新设备列表
+      // 刷新设备列表（仅标记体脂秤相关项为需刷新）
       const app = getApp()
-      app.clearDashboardCache()
-      await this.loadUserDevices()
+      app.refreshDashboardCache(['device_platforms', 'xiaomi_config', 'scale_stats'])
+      // 【修复】重置加载锁，确保能发起新请求
+      this.isLoadingDevices = false
+      this.devicesLoaded = false
+      await this.loadUserDevices(true)
 
       // 2 秒后释放 BLE 自动跳转锁
       setTimeout(() => {
@@ -771,12 +788,18 @@ Page({
       wx.hideLoading()
       wx.showToast({ title: '删除成功', icon: 'success' })
 
-      // 清除 dashboard 缓存及在途请求，确保删除后立即刷新
+      // 清除 dashboard 缓存（标记所有项为需刷新）
       const app = getApp();
-      app.clearDashboardCache()
+      app.refreshDashboardCache([
+        'device_platforms', 'cloudpets_plans', 'cloudpets_servings',
+        'petkit_devices', 'xiaomi_config', 'scale_stats'
+      ])
+      // 【修复】重置加载锁，确保 loadUserDevices 能发起新请求
+      this.isLoadingDevices = false
+      this.devicesLoaded = false
       
       // 刷新设备列表
-      await this.loadUserDevices()
+      await this.loadUserDevices(true)
     } catch (err) {
       wx.hideLoading()
       console.error('删除设备失败:', err)
@@ -911,7 +934,7 @@ Page({
     
     try {
       // 重新加载设备数据（用户主动刷新，BLE 条件启动已集成在 loadUserDevices 内）
-      await this.loadUserDevices()
+      await this.loadUserDevices(true)
       
       wx.showToast({
         title: '刷新成功',
@@ -1132,11 +1155,14 @@ Page({
         wx.showToast({ title: '设备已添加', icon: 'success', duration: 2000 })
         // 【修复】清除前端30秒dashboard缓存，确保重新加载时拉取最新数据
         const app = getApp()
-        app.clearDashboardCache()
+        app.refreshDashboardCache([
+          'device_platforms', 'cloudpets_plans', 'cloudpets_servings',
+          'petkit_devices', 'xiaomi_config', 'scale_stats'
+        ])
         // 重置加载锁，允许重新加载
         this.isLoadingDevices = false
         this.devicesLoaded = false
-        setTimeout(() => this.loadUserDevices(), 1500)
+        setTimeout(() => this.loadUserDevices(true), 1500)
       } else {
         wx.showToast({ title: res?.message || '配置失败', icon: 'none' })
       }

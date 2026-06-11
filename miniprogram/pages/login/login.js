@@ -131,6 +131,12 @@ Page({
     } catch (err) {
       const sc = err?.statusCode;
       const detail = err?.data?.detail || '';
+      const errMsg = (err && (err.errMsg || err.message || '')) || '';
+
+      // 诊断：静默登录失败原因分析
+      if (errMsg.includes('timeout') || errMsg.includes('TIME_OUT') || errMsg.includes('ETIMEDOUT')) {
+        console.warn('[Login] ⚠ 静默登录请求超时（真机网络诊断：检查局域网连通性、防火墙、后端服务）');
+      }
 
       if (sc === 401 || (detail && detail.code === 'UNBOUND')) {
         // 未绑定/已退出 → 展示登录选择页
@@ -141,10 +147,13 @@ Page({
           this.startPhoneOnlyMode();
         }
       } else {
-        // 网络错误 → 降级展示
+        // 网络错误 → 降级展示（超时时显示更友好的提示）
         const lastPhone = wx.getStorageSync('lastLogoutPhone') || '';
+        const timeoutHint = (errMsg.includes('timeout') || errMsg.includes('TIME_OUT'))
+          ? '连接超时，请确认手机与电脑在同一网络，以及后端服务已启动'
+          : '网络异常，请重试';
         if (lastPhone) {
-          this.showLoginSelect('网络异常，请重试', lastPhone);
+          this.showLoginSelect(timeoutHint, lastPhone);
         } else {
           this.startPhoneOnlyMode();
         }
@@ -490,8 +499,8 @@ Page({
       msg = typeof detail === 'string' ? detail : '参数有误';
     } else if (errMsg.includes('CONNECTION_RESET') || errMsg.includes('network')) {
       msg = '无法连接服务器，请确保后端已启动';
-    } else if (errMsg.includes('timeout')) {
-      msg = '请求超时，请检查服务器是否正常';
+    } else if (errMsg.includes('timeout') || errMsg.includes('TIME_OUT') || errMsg.includes('ETIMEDOUT')) {
+      msg = '请求超时，请检查：\n1) 手机与电脑是否在同一WiFi网络\n2) Windows防火墙是否放行8000端口\n3) 后端服务是否已启动';
     } else {
       msg = `请求失败: ${errMsg}`;
     }

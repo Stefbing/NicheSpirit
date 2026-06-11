@@ -8,7 +8,7 @@
 // 配置：切换运行环境
 const CONFIG = {
   // 'cloud' - 云托管模式, 'local' - 本地调试模式, 'prod' - 生产模式
-  mode: 'prod',
+  mode: 'local',
 
   // 云托管配置
   cloudEnv: 'prod-d5g0so0137afcfdd5',
@@ -18,10 +18,10 @@ const CONFIG = {
   localBaseUrl: 'http://192.168.1.3:8000',
   prodBaseUrl: 'https://api.stefbing.xyz',
 
-  // 请求超时（ms）
-  timeout: 15000,
-  // 最大重试次数
-  maxRetries: 1
+  // 请求超时（ms）- 真机局域网环境可能较慢
+  timeout: 20000,
+  // 最大重试次数（真机网络不稳定，增加一次重试机会）
+  maxRetries: 2
 };
 
 let isCloudInitialized = false;
@@ -101,6 +101,7 @@ function httpRequest(path, method, data, header, timeout) {
   console.log(`[Request] [${modeLabel}] → ${method} ${url}`);
 
   return new Promise((resolve, reject) => {
+    const startTime = Date.now();
     wx.request({
       url: url,
       method: method,
@@ -111,7 +112,8 @@ function httpRequest(path, method, data, header, timeout) {
       },
       data: data,
       success: (res) => {
-        console.log(`[Request] ← ${res.statusCode} ${method} ${path}`);
+        const elapsed = Date.now() - startTime;
+        console.log(`[Request] ← ${res.statusCode} ${method} ${path} (${elapsed}ms)`);
         if (res.statusCode >= 200 && res.statusCode < 300) {
           resolve(res.data);
         } else {
@@ -119,7 +121,19 @@ function httpRequest(path, method, data, header, timeout) {
         }
       },
       fail: (err) => {
-        console.error(`[Request] ✗ HTTP 请求失败 [${url}]:`, err);
+        const elapsed = Date.now() - startTime;
+        const errMsg = (err && err.errMsg) || '';
+        // 识别超时 vs 连接拒绝，帮助定位真机网络问题
+        if (errMsg.indexOf('timeout') !== -1 || errMsg.indexOf('ETIMEDOUT') !== -1) {
+          console.error(`[Request] ✗ 请求超时 [${url}] (${elapsed}ms/${timeout}ms): 请检查：` +
+            '1) 手机与电脑是否在同一局域网；2) Windows防火墙是否放行8000端口；3) 后端服务是否正常运行');
+        } else if (errMsg.indexOf('refuse') !== -1 || errMsg.indexOf('ECONNREFUSED') !== -1) {
+          console.error(`[Request] ✗ 连接被拒 [${url}] (${elapsed}ms): 后端服务未启动或端口错误`);
+        } else if (errMsg.indexOf('fail') !== -1 && elapsed >= timeout) {
+          console.error(`[Request] ✗ 请求超时（wx.request fail）[${url}] (${elapsed}ms/${timeout}ms)`);
+        } else {
+          console.error(`[Request] ✗ HTTP 请求失败 [${url}] (${elapsed}ms):`, err);
+        }
         reject(err);
       }
     });
