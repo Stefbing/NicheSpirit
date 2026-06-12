@@ -177,7 +177,14 @@ async def _warmup_dashboard_cache(user_ids: List[int], platform: str):
 
 async def _warmup_single_user_dashboard(user_id: int, cache_manager) -> bool:
     """
-    预热单个用户的Dashboard缓存
+    预热单个用户的Dashboard缓存（仅L2组件缓存）
+    
+    【修复】不再预热L1整体缓存，因为：
+    1. L1缓存需要完整的Dashboard数据（包括device_platforms、shared_creds等）
+    2. 数据同步任务只能提供部分组件数据（petkit_devices、cloudpets_servings等）
+    3. 避免L1缓存中存储不完整数据，导致前端渲染失败
+    
+    L1缓存会在用户实际请求Dashboard数据时设置（通过API端点）
     
     Args:
         user_id: 用户ID
@@ -187,37 +194,38 @@ async def _warmup_single_user_dashboard(user_id: int, cache_manager) -> bool:
         是否成功
     """
     try:
-        # 1. 收集各组件缓存数据
-        dashboard_data = {}
+        warmup_count = 0
         
+        # 1. 预热L2组件缓存（从Redis读取最新数据）
         # PetKit设备
         petkit_devices = await redis_cache.get(f"user_{user_id}_petkit_devices")
         if petkit_devices is not None:
-            dashboard_data['petkit_devices'] = petkit_devices
+            await cache_manager.set_component_cache(user_id, 'petkit_devices', petkit_devices)
+            warmup_count += 1
         
         # CloudPets投喂记录
         cloudpets_servings = await redis_cache.get(f"user_{user_id}_cloudpets_servings")
         if cloudpets_servings is not None:
-            dashboard_data['cloudpets_servings'] = cloudpets_servings
+            await cache_manager.set_component_cache(user_id, 'cloudpets_servings', cloudpets_servings)
+            warmup_count += 1
         
         # CloudPets喂食计划
         cloudpets_plans = await redis_cache.get(f"user_{user_id}_cloudpets_plans")
         if cloudpets_plans is not None:
-            dashboard_data['cloudpets_plans'] = cloudpets_plans
+            await cache_manager.set_component_cache(user_id, 'cloudpets_plans', cloudpets_plans)
+            warmup_count += 1
         
         # 体脂秤统计
         scale_stats = await redis_cache.get(f"user_{user_id}_scale_stats")
         if scale_stats is not None:
-            dashboard_data['scale_stats'] = scale_stats
+            await cache_manager.set_component_cache(user_id, 'scale_stats', scale_stats)
+            warmup_count += 1
         
-        # 2. 如果有数据，预热Dashboard整体缓存
-        if dashboard_data:
-            await cache_manager.set_dashboard_cache(user_id, dashboard_data)
-            logger.debug(f"[DataSync] 预热Dashboard缓存 user_id={user_id}")
-            return True
-        else:
-            logger.debug(f"[DataSync] 无数据可预热 user_id={user_id}")
-            return False
+        # 2. 【修复】不再预热L1整体缓存，避免存储不完整数据
+        # L1缓存会在用户实际请求Dashboard数据时设置
+        
+        logger.debug(f"[DataSync] 预热L2缓存完成 user_id={user_id} components={warmup_count}")
+        return True
     except Exception as e:
         logger.warning(f"[DataSync] 预热用户Dashboard缓存失败 user_id={user_id}: {e}")
         return False
