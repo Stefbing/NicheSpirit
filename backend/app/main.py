@@ -18,12 +18,23 @@ from backend.app.services.cloudpets_service import cloudpets_service, FeedingPla
 from backend.app.models.models import User, WeightRecord, SystemConfig, FamilyMember
 from backend.app.models.db import get_session, init_db, engine
 from backend.app.utils.redis_cache import redis_cache
+from backend.app.utils.dashboard_cache_manager import get_dashboard_cache_manager
 from backend.app.utils.config_encryptor import ConfigEncryptor
+from backend.app.utils.cache_key_builder import (
+    build_user_cache_key,
+    build_session_cache_key,
+    build_platform_first_user_cache_key,
+    build_shared_creds_cache_key,
+    build_dashboard_cache_key,
+)
 from backend.app.scheduler.task_scheduler import scheduler
 from backend.app.scheduler.data_sync import sync_petkit_data, sync_cloudpets_data
 from backend.app.share_routes import router as share_router
 
 load_dotenv()
+
+# 缓存TTL配置（与 data_sync.py 保持一致）
+CACHE_TTL = 600  # 10分钟
 
 # --- AppState & Helpers ---
 class AppState:
@@ -77,7 +88,7 @@ async def _get_first_user_with_platform(platform: str) -> Optional[int]:
     【修复】缩短 TTL 从 3600s 到 300s，减少设备分享场景下的缓存延迟
     """
     from backend.app.utils.redis_cache import redis_cache
-    cache_key = f"first_user:platform:{platform}"
+    cache_key = build_platform_first_user_cache_key(platform)
 
     cached = await redis_cache.get(cache_key)
     if cached is not None:
@@ -869,13 +880,13 @@ async def _invalidate_shared_caches(owner_user_id: int, platform: str):
         cache_keys = set()
         for uid in recipients:
             if platform == "petkit":
-                cache_keys.add(f"shared_creds:user_{uid}")
-                cache_keys.add(f"user_{uid}_petkit_devices")
-                cache_keys.add(f"user_{uid}_petkit_devices_with_stats")
+                cache_keys.add(build_shared_creds_cache_key(uid))
+                cache_keys.add(build_user_cache_key(uid, "petkit_devices"))
+                cache_keys.add(build_user_cache_key(uid, "petkit_devices_with_stats"))
             elif platform == "cloudpets":
-                cache_keys.add(f"shared_creds:user_{uid}")
-                cache_keys.add(f"user_{uid}_cloudpets_servings")
-                cache_keys.add(f"user_{uid}_cloudpets_plans")
+                cache_keys.add(build_shared_creds_cache_key(uid))
+                cache_keys.add(build_user_cache_key(uid, "cloudpets_servings"))
+                cache_keys.add(build_user_cache_key(uid, "cloudpets_plans"))
         for key in cache_keys:
             await redis_cache.delete(key)
         if recipients:
@@ -910,26 +921,26 @@ async def _sync_all_shared_caches(platform: str, actor_user_id: int):
         # 权威缓存（owner的）
         if platform == "petkit":
             keys_to_delete.extend([
-                f"user_{owner_id}_petkit_devices",
-                f"user_{owner_id}_petkit_devices_with_stats",
+                build_user_cache_key(owner_id, "petkit_devices"),
+                build_user_cache_key(owner_id, "petkit_devices_with_stats"),
             ])
         elif platform == "cloudpets":
             keys_to_delete.extend([
-                f"user_{owner_id}_cloudpets_servings",
-                f"user_{owner_id}_cloudpets_plans",
+                build_user_cache_key(owner_id, "cloudpets_servings"),
+                build_user_cache_key(owner_id, "cloudpets_plans"),
             ])
 
         # 当前操作者的缓存（如果操作者不是owner）
         if actor_user_id != owner_id:
             if platform == "petkit":
                 keys_to_delete.extend([
-                    f"user_{actor_user_id}_petkit_devices",
-                    f"user_{actor_user_id}_petkit_devices_with_stats",
+                    build_user_cache_key(actor_user_id, "petkit_devices"),
+                    build_user_cache_key(actor_user_id, "petkit_devices_with_stats"),
                 ])
             elif platform == "cloudpets":
                 keys_to_delete.extend([
-                    f"user_{actor_user_id}_cloudpets_servings",
-                    f"user_{actor_user_id}_cloudpets_plans",
+                    build_user_cache_key(actor_user_id, "cloudpets_servings"),
+                    build_user_cache_key(actor_user_id, "cloudpets_plans"),
                 ])
 
         # 3. 执行批量删除
@@ -952,12 +963,41 @@ async def _sync_all_shared_caches(platform: str, actor_user_id: int):
 
 
 @app.get("/api/dashboard/data")
-async def get_dashboard_data(current_user: User = Depends(get_current_user), session: Session = Depends(get_session)):
-    """Get aggregated dashboard data for current user
-    【优化】V2 - 减少 DB 查询次数、裁剪响应载荷、使用 Redis 兜底
+async def get_dashboard_data(
+    force_refresh: bool = False,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session)
+):
+    """
+    获取Dashboard数据 - 优化后的缓存策略
+
+    【优化点】
+    1. 使用DashboardCacheManager统一管理缓存
+    2. 缓存TTL从60秒提升到300秒（与数据同步间隔对齐）
+    3. 添加缓存命中率监控
+    4. 支持智能缓存预热
+
+    - force_refresh=True: 强制刷新缓存
+    - force_refresh=False: 优先读缓存，缓存miss则查询
     """
     try:
         user_id = current_user.id
+
+        # 【优化】使用DashboardCacheManager
+        cache_manager = get_dashboard_cache_manager(redis_cache)
+
+        # 1. 如果不强制刷新，先读缓存（L1）
+        if not force_refresh:
+            cached = await cache_manager.get_dashboard_cache(user_id)
+            if cached is not None:
+                # 缓存命中，补充实时数据（如有必要）
+                logger.info(f"[Dashboard] L1缓存命中 user_id={user_id}")
+                return cached
+            else:
+                logger.info(f"[Dashboard] L1缓存未命中 user_id={user_id}")
+
+        # 2. 缓存miss或强制刷新，查询数据
+        logger.info(f"[Dashboard] 查询数据 user_id={user_id} force_refresh={force_refresh}")
 
         dashboard_data = {}
 
@@ -975,21 +1015,18 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
             for p, r in user_platforms.items()
         ]
 
-        # ── 2. 共享凭据（Redis 缓存 60s，共享变化不频繁） ──
-        shared_cache_key = f"shared_creds:user_{user_id}"
-        shared_creds = await redis_cache.get(shared_cache_key)
+        # ── 2. 共享凭据（Redis 缓存 600s，共享变化不频繁） ──
+        shared_cache_key = build_shared_creds_cache_key(user_id)
+        shared_creds = await cache_manager.get_component_cache(user_id, 'shared_creds')
         if shared_creds is None:
             shared_creds = await _get_shared_platform_credentials(user_id)
-            # 【修复】空结果仅缓存 10s（避免写入后 60s 内查询不到），非空缓存 60s
-            empty_ttl = 10
-            cache_ttl = empty_ttl if not shared_creds else 60
-            await redis_cache.set(shared_cache_key, shared_creds, ttl=cache_ttl)
-            logger.info(f"[CacheLog] user={user_id} shared_creds MISS → DB查询完成 keys={list(shared_creds.keys()) if shared_creds else '空'} TTL={cache_ttl}s")
+            # 缓存共享凭据
+            await cache_manager.set_component_cache(user_id, 'shared_creds', shared_creds)
+            logger.info(f"[CacheLog] user={user_id} shared_creds MISS → DB查询完成 keys={list(shared_creds.keys()) if shared_creds else '空'}")
         else:
-            logger.info(f"[CacheLog] user={user_id} shared_creds HIT key={shared_cache_key} keys={list(shared_creds.keys()) if shared_creds else '空'}")
+            logger.info(f"[CacheLog] user={user_id} shared_creds HIT keys={list(shared_creds.keys()) if shared_creds else '空'}")
 
         existing_complete = {p['platform'] for p in dashboard_data['device_platforms'] if p['is_complete']}
-        need_device_invalidate = False
         for platform_name, cred_info in shared_creds.items():
             if platform_name not in existing_complete:
                 is_ble = cred_info.get('_is_ble', False)
@@ -1001,39 +1038,27 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
 
         dashboard_data['has_shared_devices'] = len(shared_creds) > 0
 
-        for platform_name in shared_creds:
-            rec = user_platforms.get(platform_name)
-            if rec and not rec.is_complete and not rec.is_ble:
-                logger.info(f'[Dashboard] 清理 user={user_id} 的不完整 {platform_name} 残留')
-                await device_cache.invalidate_platform(user_id, platform_name)
-                need_device_invalidate = True
-                dashboard_data['device_platforms'] = [
-                    p for p in dashboard_data.get('device_platforms', [])
-                    if not (p['platform'] == platform_name and not p['is_complete'])
-                ]
-
-        # ── 3. 从 Redis 读取第三方缓存数据 ──
-        # 【修复】device_platforms 已按 user_id 隔离，此处同步读取对应用户的缓存
-        # 优先使用当前用户的 user_id 读取，若当前用户无自有数据则 fallback 到第一个用户
+        # ── 3. 从 Redis 读取第三方缓存数据（使用L2缓存） ──
         pk_user_id = await _get_pk_user_for_dashboard(user_id, user_platforms, shared_creds)
         petkit_devices = []
         if pk_user_id:
-            owner_key = f"user_{pk_user_id}_petkit_devices"
-            cached = await redis_cache.get(owner_key)
-            if cached:
-                petkit_devices = _trim_petkit_payload(cached)
-                logger.info(f"[CacheLog] user={user_id} PKT设备 HIT owner_key={owner_key} count={len(cached) if isinstance(cached, list) else '?'}")
-            else:
-                # 【修复】所有者缓存 miss → 尝试从当前用户缓存回退
-                self_key = f"user_{user_id}_petkit_devices"
-                self_cached = await redis_cache.get(self_key)
-                if self_cached:
-                    petkit_devices = _trim_petkit_payload(self_cached)
-                    # 预热所有者缓存
-                    await redis_cache.set(owner_key, self_cached, ttl=300)
-                    logger.info(f"[CacheLog] user={user_id} PKT设备 MISS owner → HIT self_key={self_key} 已回填 {owner_key} count={len(self_cached) if isinstance(self_cached, list) else '?'}")
+            # 【优化】使用cache_manager读取L2缓存
+            petkit_devices = await cache_manager.get_component_cache(pk_user_id, 'petkit_devices')
+            if petkit_devices is None:
+                # L2缓存miss，尝试从当前用户缓存回退
+                petkit_devices = await cache_manager.get_component_cache(user_id, 'petkit_devices')
+                if petkit_devices is not None:
+                    # 回退命中，预热所有者缓存
+                    await cache_manager.set_component_cache(pk_user_id, 'petkit_devices', petkit_devices)
+                    logger.info(f"[CacheLog] user={user_id} PKT设备 回退命中 → 已预热所有者缓存")
                 else:
-                    logger.info(f"[CacheLog] user={user_id} PKT设备 双MISS owner={owner_key} self={self_key} → 返回空列表")
+                    logger.info(f"[CacheLog] user={user_id} PKT设备 双MISS → 返回空列表")
+            else:
+                logger.info(f"[CacheLog] user={user_id} PKT设备 HIT count={len(petkit_devices) if isinstance(petkit_devices, list) else '?'}")
+
+            # 裁剪冗余数据
+            if petkit_devices:
+                petkit_devices = _trim_petkit_payload(petkit_devices)
         else:
             logger.info(f"[CacheLog] user={user_id} PKT设备 无pk_user_id(无PetKit配置)")
 
@@ -1041,42 +1066,34 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
         cloudpets_servings = {}
         cloudpets_plans = []
         if cp_user_id:
-            owner_sv_key = f"user_{cp_user_id}_cloudpets_servings"
-            cached_sv = await redis_cache.get(owner_sv_key)
-            if cached_sv:
-                cloudpets_servings = cached_sv
-                logger.info(f"[CacheLog] user={user_id} CP servings HIT owner_key={owner_sv_key} result={cached_sv.get('result', '?')}")
-            else:
-                # 【修复】所有者缓存 miss → 从当前用户缓存回退
-                self_sv_key = f"user_{user_id}_cloudpets_servings"
-                self_sv = await redis_cache.get(self_sv_key)
-                if self_sv:
-                    cloudpets_servings = self_sv
-                    await redis_cache.set(owner_sv_key, self_sv, ttl=120)
-                    logger.info(f"[CacheLog] user={user_id} CP servings MISS owner → HIT self_key={self_sv_key} 已回填 result={self_sv.get('result', '?')}")
+            # 【优化】使用cache_manager读取L2缓存
+            cloudpets_servings = await cache_manager.get_component_cache(cp_user_id, 'cloudpets_servings')
+            if cloudpets_servings is None:
+                cloudpets_servings = await cache_manager.get_component_cache(user_id, 'cloudpets_servings')
+                if cloudpets_servings is not None:
+                    await cache_manager.set_component_cache(cp_user_id, 'cloudpets_servings', cloudpets_servings)
+                    logger.info(f"[CacheLog] user={user_id} CP servings 回退命中")
                 else:
-                    logger.info(f"[CacheLog] user={user_id} CP servings 双MISS owner={owner_sv_key} self={self_sv_key} → 返回空")
+                    logger.info(f"[CacheLog] user={user_id} CP servings 双MISS")
+            else:
+                logger.info(f"[CacheLog] user={user_id} CP servings HIT result={cloudpets_servings.get('result', '?') if isinstance(cloudpets_servings, dict) else '?'}")
 
-            owner_pl_key = f"user_{cp_user_id}_cloudpets_plans"
-            cached_pl = await redis_cache.get(owner_pl_key)
-            if cached_pl:
-                cloudpets_plans = cached_pl
-                logger.info(f"[CacheLog] user={user_id} CP plans HIT owner_key={owner_pl_key} count={len(cached_pl) if isinstance(cached_pl, list) else '?'}")
-            else:
-                self_pl_key = f"user_{user_id}_cloudpets_plans"
-                self_pl = await redis_cache.get(self_pl_key)
-                if self_pl:
-                    cloudpets_plans = self_pl
-                    await redis_cache.set(owner_pl_key, self_pl, ttl=300)
-                    logger.info(f"[CacheLog] user={user_id} CP plans MISS owner → HIT self_key={self_pl_key} 已回填 count={len(self_pl) if isinstance(self_pl, list) else '?'}")
+            cloudpets_plans = await cache_manager.get_component_cache(cp_user_id, 'cloudpets_plans')
+            if cloudpets_plans is None:
+                cloudpets_plans = await cache_manager.get_component_cache(user_id, 'cloudpets_plans')
+                if cloudpets_plans is not None:
+                    await cache_manager.set_component_cache(cp_user_id, 'cloudpets_plans', cloudpets_plans)
+                    logger.info(f"[CacheLog] user={user_id} CP plans 回退命中")
                 else:
-                    logger.info(f"[CacheLog] user={user_id} CP plans 双MISS owner={owner_pl_key} self={self_pl_key} → 返回空列表")
+                    logger.info(f"[CacheLog] user={user_id} CP plans 双MISS")
+            else:
+                logger.info(f"[CacheLog] user={user_id} CP plans HIT count={len(cloudpets_plans) if isinstance(cloudpets_plans, list) else '?'}")
         else:
             logger.info(f"[CacheLog] user={user_id} CP 无cp_user_id(无CloudPets配置)")
 
-        dashboard_data['petkit_devices'] = petkit_devices
-        dashboard_data['cloudpets_servings'] = cloudpets_servings
-        dashboard_data['cloudpets_plans'] = cloudpets_plans
+        dashboard_data['petkit_devices'] = petkit_devices or []
+        dashboard_data['cloudpets_servings'] = cloudpets_servings or {}
+        dashboard_data['cloudpets_plans'] = cloudpets_plans or []
 
         # 【新增】Dashboard 数据汇总日志
         logger.info(
@@ -1087,12 +1104,12 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
             f"shared_creds_keys={list(shared_creds.keys()) if shared_creds else '无'}"
         )
 
-        # ── 4. 体脂秤状态 + 今日统计（DB 查询，Redis 缓存 60s） ──
-        scale_cache_key = f"scale_stats:user_{user_id}"
-        cached_scale = await redis_cache.get(scale_cache_key)
-        if cached_scale is not None:
-            dashboard_data['scale_stats'] = cached_scale
-            dashboard_data['xiaomi_config'] = cached_scale.get('_xiaomi_config', False)
+        # ── 4. 体脂秤状态 + 今日统计（DB 查询，Redis 缓存 300s） ──
+        scale_stats = await cache_manager.get_component_cache(user_id, 'scale_stats')
+        if scale_stats is not None:
+            dashboard_data['scale_stats'] = scale_stats
+            dashboard_data['xiaomi_config'] = scale_stats.get('_xiaomi_config', False)
+            logger.info(f"[CacheLog] user={user_id} 体脂秤统计 HIT")
         else:
             xiaomi_rec = user_platforms.get('xiaomi')
             dashboard_data['xiaomi_config'] = (
@@ -1100,13 +1117,10 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
             )
 
             try:
-                from datetime import datetime
-                from sqlalchemy import func
                 today_start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
                 today_end = int(datetime.now().replace(hour=23, minute=59, second=59, microsecond=999999).timestamp() * 1000)
 
-                # 【优化】使用单个SQL查询合并count和latest body_fat，减少DB往返
-                # 原先是两个独立查询，现在用子查询一次搞定
+                # 【优化】使用单个SQL查询合并count和latest body_fat
                 from sqlalchemy import text as sa_text
                 combined_sql = sa_text("""
                     SELECT 
@@ -1132,7 +1146,11 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
                     'latest_body_fat': round(float(latest_fat), 1) if latest_fat is not None else None,
                     '_xiaomi_config': dashboard_data['xiaomi_config'],
                 }
-                await redis_cache.set(scale_cache_key, scale_stats, ttl=60)
+
+                # 【优化】缓存300秒（从60秒提升）
+                await cache_manager.set_component_cache(user_id, 'scale_stats', scale_stats)
+                logger.info(f"[CacheLog] user={user_id} 体脂秤统计 MISS → 已缓存300s")
+
                 dashboard_data['scale_stats'] = {
                     'today_count': today_count,
                     'latest_body_fat': round(float(latest_fat), 1) if latest_fat is not None else None,
@@ -1142,6 +1160,16 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
                 dashboard_data['scale_stats'] = {'today_count': 0, 'latest_body_fat': None}
 
         logger.info(f'[Dashboard] user={user_id} platforms={len(dashboard_data["device_platforms"])}')
+
+        # 【架构重构】使用优化后的缓存策略：将查询结果写入Redis（TTL=300s）
+        await cache_manager.set_dashboard_cache(user_id, dashboard_data)
+
+        # 【优化】触发异步缓存预热（通知其他共享用户）
+        if shared_creds:
+            asyncio.create_task(
+                _warmup_shared_users_cache(user_id, shared_creds, dashboard_data)
+            )
+
         return dashboard_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取仪表板数据失败：{str(e)}")
@@ -1372,6 +1400,137 @@ async def petkit_history_stats(device_id: Optional[str] = None, days: int = 7, c
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取历史统计失败: {str(e)}")
+
+
+# ============================================================================
+# 缓存监控API（管理员功能）
+# ============================================================================
+
+@app.get("/api/admin/cache/stats")
+async def get_cache_stats(current_user: User = Depends(get_current_user)):
+    """
+    获取缓存命中率统计
+
+    【权限】仅管理员可访问
+    【返回】各层级缓存的命中率、命中次数、未命中次数
+    """
+    try:
+        # 【简单权限检查】这里假设user_id=1是管理员，实际应基于角色系统
+        if current_user.id != 1:
+            raise HTTPException(status_code=403, detail="权限不足，仅管理员可访问")
+
+        # 获取Dashboard缓存管理器统计
+        cache_manager = get_dashboard_cache_manager(redis_cache)
+        stats = cache_manager.get_hit_rate_stats()
+
+        # 获取Redis缓存层统计
+        redis_stats = redis_cache.get_stats()
+
+        return {
+            "dashboard_cache": stats,
+            "redis_cache": redis_stats,
+            "cache_ttl_config": CACHE_TTL,
+            "timestamp": int(time.time() * 1000),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取缓存统计失败: {str(e)}")
+
+
+@app.post("/api/admin/cache/invalidate")
+async def invalidate_cache(
+    user_id: Optional[int] = None,
+    components: Optional[List[str]] = None,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    手动失效缓存（管理员功能）
+
+    Args:
+        user_id: 要失效的用户ID，None表示失效所有用户
+        components: 要失效的组件列表，None表示失效所有
+    """
+    try:
+        # 【权限检查】
+        if current_user.id != 1:
+            raise HTTPException(status_code=403, detail="权限不足，仅管理员可访问")
+
+        cache_manager = get_dashboard_cache_manager(redis_cache)
+
+        if user_id is None:
+            # 失效所有用户缓存
+            await cache_manager.invalidate_all_cache()
+            return {"message": "已失效所有Dashboard缓存"}
+        else:
+            # 失效指定用户缓存
+            await cache_manager.invalidate_user_cache(user_id, components)
+            return {
+                "message": f"已失效用户 {user_id} 的缓存",
+                "user_id": user_id,
+                "components": components or "all",
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"失效缓存失败: {str(e)}")
+
+
+async def _warmup_shared_users_cache(owner_id: int, shared_creds: dict, dashboard_data: dict):
+    """
+    预热共享用户的Dashboard缓存
+
+    当所有者（A）的Dashboard数据更新后，主动预热被分享者（B/C/D）的缓存
+    使共享用户无需等待缓存miss即可看到最新数据
+
+    Args:
+        owner_id: 设备所有者的用户ID
+        shared_creds: 共享凭据字典
+        dashboard_data: 所有者的Dashboard数据
+    """
+    try:
+        if not shared_creds:
+            return
+
+        from backend.app.models.models import DeviceShare
+        from sqlmodel import select
+
+        # 查询所有被分享者
+        loop = asyncio.get_running_loop()
+        def _query_recipients():
+            with Session(engine) as s:
+                shares = s.exec(
+                    select(DeviceShare).where(
+                        DeviceShare.from_user_id == owner_id,
+                        DeviceShare.status == "accepted"
+                    )
+                ).all()
+                return [sh.to_user_id for sh in shares if sh.to_user_id]
+
+        recipients = await loop.run_in_executor(None, _query_recipients)
+        if not recipients:
+            return
+
+        # 预热每个被分享者的缓存
+        cache_manager = get_dashboard_cache_manager(redis_cache)
+
+        logger.info(f"[CacheWarmup] 开始预热共享用户缓存: owner={owner_id}, recipients={recipients}")
+
+        for uid in recipients:
+            try:
+                # 为被分享者构建Dashboard数据（复用所有者的数据）
+                user_data = dashboard_data.copy()
+
+                # 预热L1缓存
+                await cache_manager.set_dashboard_cache(uid, user_data)
+
+                logger.debug(f"[CacheWarmup] 预热完成: owner={owner_id} → recipient={uid}")
+            except Exception as e:
+                logger.warning(f"[CacheWarmup] 预热失败: owner={owner_id} → recipient={uid}: {e}")
+
+        logger.info(f"[CacheWarmup] ✓ 共享用户缓存预热完成: {len(recipients)} 个用户")
+    except Exception as e:
+        logger.error(f"[CacheWarmup] 共享用户缓存预热异常: {e}")
 
 @app.get("/api/petkit/devices-stats")
 async def petkit_devices_with_stats(current_user: User = Depends(get_current_user)):
@@ -2067,11 +2226,10 @@ async def bind_scale_device(request: ScaleBindRequest, current_user: User = Depe
         from backend.app.utils.device_cache import device_cache
         await device_cache.invalidate_user(uid)
         # 【清理】移除遗留的 _dashboard_combined_data 键（已不再使用）
-        cache_prefix = f'user_{uid}'
         for cache_key in [
-            f'{cache_prefix}_cloudpets_servings',
-            f'{cache_prefix}_cloudpets_plans',
-            f'{cache_prefix}_petkit_devices',
+            build_user_cache_key(uid, 'cloudpets_servings'),
+            build_user_cache_key(uid, 'cloudpets_plans'),
+            build_user_cache_key(uid, 'petkit_devices'),
         ]:
             await redis_cache.delete(cache_key)
 
@@ -2133,12 +2291,12 @@ async def add_device_api(request: AddDeviceRequest, current_user: User = Depends
                 # 从 Redis 读取刚刚保存的 token/session
                 from backend.app.utils.redis_cache import redis_cache
                 if request.platform == "petkit":
-                    session_data = await redis_cache.get(f"petkit_session:user_{uid}")
+                    session_data = await redis_cache.get(build_session_cache_key("petkit", uid))
                     if session_data:
                         token = json.dumps(session_data)
                         logger.info(f"[AddDevice] PetKit token 已从 Redis 提取: user={uid}")
                 elif request.platform == "cloudpets":
-                    redis_token = await redis_cache.get(f"cloudpets_token:user_{uid}")
+                    redis_token = await redis_cache.get(build_session_cache_key("cloudpets", uid))
                     if redis_token:
                         token = redis_token
                         logger.info(f"[AddDevice] CloudPets token 已从 Redis 提取: user={uid}")
@@ -2165,11 +2323,10 @@ async def add_device_api(request: AddDeviceRequest, current_user: User = Depends
         # Step 3: 清除缓存（泛化键，不硬编码平台名）
         from backend.app.utils.device_cache import device_cache
         await device_cache.invalidate_user(uid)
-        cache_prefix = f'user_{uid}'
         # 【清理】移除遗留的 _dashboard_combined_data 键
-        await redis_cache.delete(f'{cache_prefix}_petkit_devices')
-        await redis_cache.delete(f'{cache_prefix}_cloudpets_servings')
-        await redis_cache.delete(f'{cache_prefix}_cloudpets_plans')
+        await redis_cache.delete(build_user_cache_key(uid, 'petkit_devices'))
+        await redis_cache.delete(build_user_cache_key(uid, 'cloudpets_servings'))
+        await redis_cache.delete(build_user_cache_key(uid, 'cloudpets_plans'))
         # 【修复】设备新增可能改变"首个配置用户"，使缓存同步失效
         if request.platform in ('petkit', 'cloudpets'):
             await redis_cache.delete(f"first_user:platform:{request.platform}")
@@ -2243,10 +2400,9 @@ async def delete_device_api(device_key: str, current_user: User = Depends(get_cu
         # Clear all caches
         from backend.app.utils.device_cache import device_cache
         await device_cache.invalidate_user(uid)
-        cache_prefix = f'user_{uid}'
-        await redis_cache.delete(f'{cache_prefix}_cloudpets_servings')
-        await redis_cache.delete(f'{cache_prefix}_cloudpets_plans')
-        await redis_cache.delete(f'{cache_prefix}_petkit_devices')
+        await redis_cache.delete(build_user_cache_key(uid, 'cloudpets_servings'))
+        await redis_cache.delete(build_user_cache_key(uid, 'cloudpets_plans'))
+        await redis_cache.delete(build_user_cache_key(uid, 'petkit_devices'))
         # 【修复】设备删除可能改变"首个配置用户"
         platform = device_key.split('_')[0] if '_' in device_key else device_key
         if platform in ('petkit', 'cloudpets'):
@@ -2843,4 +2999,31 @@ async def delete_account(
         import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"注销失败：{str(e)}")
+
+
+# --- Cache Monitoring APIs ---
+@app.get("/api/cache/stats")
+async def get_cache_stats(session: Session = Depends(get_session)):
+    """获取缓存统计信息
+
+    返回缓存命中率、未命中率、总请求数等统计信息
+    """
+    stats = redis_cache.get_stats()
+    return {
+        "status": "success",
+        "data": stats
+    }
+
+
+@app.post("/api/cache/reset")
+async def reset_cache_stats(session: Session = Depends(get_session)):
+    """重置缓存统计信息
+
+    清除所有缓存统计计数器
+    """
+    redis_cache.reset_stats()
+    return {
+        "status": "success",
+        "message": "缓存统计已重置"
+    }
 

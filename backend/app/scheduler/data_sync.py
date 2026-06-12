@@ -1,17 +1,21 @@
 """
 后台数据同步任务 — 定时从 PetKit / CloudPets 第三方 API 拉取数据写入 Redis
 实现 Dashboard 读写分离，主请求线程不再发起外网 HTTP 调用
+
+【优化】集成Dashboard缓存管理器，实现智能缓存预热
 """
 import asyncio
 import logging
 from sqlmodel import Session, select
+from typing import List, Dict, Any
 
 from backend.app.models.db import engine
-from backend.app.models.models import SystemConfig
+from backend.app.models.models import SystemConfig, User
 from backend.app.services.petkit_service import PetKitService
 from backend.app.services.cloudpets_service import CloudPetsService
 from backend.app.utils.config_manager import get_config_from_db
 from backend.app.utils.redis_cache import redis_cache
+from backend.app.utils.dashboard_cache_manager import get_dashboard_cache_manager
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +79,10 @@ async def sync_petkit_data():
 
     logger.info(f"[DataSync] ✓ PetKit 全量同步完成, {success_count}/{len(user_ids)} 个用户 → Redis")
 
+    # 【优化】同步完成后，预热Dashboard缓存
+    if success_count > 0:
+        await _warmup_dashboard_cache(user_ids[:success_count], "petkit")
+
 
 # ── CloudPets 同步 ───────────────────────────────────────
 
@@ -123,3 +131,94 @@ async def sync_cloudpets_data():
             logger.error(f"[DataSync] CloudPets 用户 {user_id} 同步异常: {e}")
 
     logger.info(f"[DataSync] ✓ CloudPets 全量同步完成, {success_count}/{len(user_ids)} 个用户 → Redis")
+
+    # 【优化】同步完成后，预热Dashboard缓存
+    if success_count > 0:
+        await _warmup_dashboard_cache(user_ids[:success_count], "cloudpets")
+
+
+# ── 缓存预热辅助函数 ───────────────────────────────────────
+
+async def _warmup_dashboard_cache(user_ids: List[int], platform: str):
+    """
+    预热指定用户的Dashboard缓存
+    
+    在数据同步完成后调用，主动更新Dashboard整体缓存和组件缓存
+    
+    Args:
+        user_ids: 用户ID列表
+        platform: 平台名称（petkit/cloudpets）
+    """
+    try:
+        from backend.app.utils.dashboard_cache_manager import get_dashboard_cache_manager
+        from backend.app.utils.redis_cache import redis_cache
+        
+        cache_manager = get_dashboard_cache_manager(redis_cache)
+        
+        logger.info(f"[DataSync] 开始预热Dashboard缓存 platform={platform} users={len(user_ids)}")
+        
+        # 批量预热（控制并发数）
+        batch_size = 5
+        for i in range(0, len(user_ids), batch_size):
+            batch = user_ids[i:i + batch_size]
+            
+            # 并发预热当前批次
+            tasks = [_warmup_single_user_dashboard(uid, cache_manager) for uid in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 统计成功/失败
+            success = sum(1 for r in results if r is True)
+            logger.debug(f"[DataSync] 预热批次 {i//batch_size + 1} 完成: {success}/{len(batch)}")
+        
+        logger.info(f"[DataSync] ✓ Dashboard缓存预热完成 platform={platform}")
+    except Exception as e:
+        logger.error(f"[DataSync] Dashboard缓存预热失败: {e}")
+
+
+async def _warmup_single_user_dashboard(user_id: int, cache_manager) -> bool:
+    """
+    预热单个用户的Dashboard缓存
+    
+    Args:
+        user_id: 用户ID
+        cache_manager: Dashboard缓存管理器实例
+        
+    Returns:
+        是否成功
+    """
+    try:
+        # 1. 收集各组件缓存数据
+        dashboard_data = {}
+        
+        # PetKit设备
+        petkit_devices = await redis_cache.get(f"user_{user_id}_petkit_devices")
+        if petkit_devices is not None:
+            dashboard_data['petkit_devices'] = petkit_devices
+        
+        # CloudPets投喂记录
+        cloudpets_servings = await redis_cache.get(f"user_{user_id}_cloudpets_servings")
+        if cloudpets_servings is not None:
+            dashboard_data['cloudpets_servings'] = cloudpets_servings
+        
+        # CloudPets喂食计划
+        cloudpets_plans = await redis_cache.get(f"user_{user_id}_cloudpets_plans")
+        if cloudpets_plans is not None:
+            dashboard_data['cloudpets_plans'] = cloudpets_plans
+        
+        # 体脂秤统计
+        scale_stats = await redis_cache.get(f"user_{user_id}_scale_stats")
+        if scale_stats is not None:
+            dashboard_data['scale_stats'] = scale_stats
+        
+        # 2. 如果有数据，预热Dashboard整体缓存
+        if dashboard_data:
+            await cache_manager.set_dashboard_cache(user_id, dashboard_data)
+            logger.debug(f"[DataSync] 预热Dashboard缓存 user_id={user_id}")
+            return True
+        else:
+            logger.debug(f"[DataSync] 无数据可预热 user_id={user_id}")
+            return False
+    except Exception as e:
+        logger.warning(f"[DataSync] 预热用户Dashboard缓存失败 user_id={user_id}: {e}")
+        return False
+

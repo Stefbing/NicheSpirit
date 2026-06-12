@@ -9,6 +9,11 @@ logger = logging.getLogger(__name__)
 
 from backend.app.models.models import User, DeviceShare, SharedDeviceConfig, SystemConfig
 from backend.app.models.db import get_session
+from backend.app.utils.cache_key_builder import (
+    build_user_cache_key,
+    build_petkit_stats_cache_key,
+    build_shared_creds_cache_key,
+)
 
 # 【惰性导入】避免与 main.py 的 from share_routes import router 形成循环导入
 async def _get_current_user(authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
@@ -252,27 +257,27 @@ async def accept_share(request: AcceptShareRequest, current_user: User = Depends
         from_user_id = share.from_user_id
         for platform in platforms:
             if platform == "petkit":
-                src = await redis_cache.get(f"user_{from_user_id}_petkit_devices")
+                src = await redis_cache.get(build_user_cache_key(from_user_id, "petkit_devices"))
                 if src:
-                    await redis_cache.set(f"user_{to_user_id}_petkit_devices", src, ttl=300)
-                src2 = await redis_cache.get(f"user_{from_user_id}_petkit_devices_with_stats")
+                    await redis_cache.set(build_user_cache_key(to_user_id, "petkit_devices"), src, ttl=300)
+                src2 = await redis_cache.get(build_user_cache_key(from_user_id, "petkit_devices_with_stats"))
                 if src2:
-                    await redis_cache.set(f"user_{to_user_id}_petkit_devices_with_stats", src2, ttl=60)
+                    await redis_cache.set(build_user_cache_key(to_user_id, "petkit_devices_with_stats"), src2, ttl=60)
                 # 同步 PetKit 统计缓存
                 if isinstance(src, list):
                     for dev in src:
                         did = dev.get('id') if isinstance(dev, dict) else ''
                         if did:
-                            s = await redis_cache.get(f"user_{from_user_id}_petkit_stats_{did}")
+                            s = await redis_cache.get(build_petkit_stats_cache_key(from_user_id, did))
                             if s:
-                                await redis_cache.set(f"user_{to_user_id}_petkit_stats_{did}", s, ttl=180)
+                                await redis_cache.set(build_petkit_stats_cache_key(to_user_id, did), s, ttl=180)
             elif platform == "cloudpets":
-                sv = await redis_cache.get(f"user_{from_user_id}_cloudpets_servings")
+                sv = await redis_cache.get(build_user_cache_key(from_user_id, "cloudpets_servings"))
                 if sv:
-                    await redis_cache.set(f"user_{to_user_id}_cloudpets_servings", sv, ttl=120)
-                pl = await redis_cache.get(f"user_{from_user_id}_cloudpets_plans")
+                    await redis_cache.set(build_user_cache_key(to_user_id, "cloudpets_servings"), sv, ttl=120)
+                pl = await redis_cache.get(build_user_cache_key(from_user_id, "cloudpets_plans"))
                 if pl:
-                    await redis_cache.set(f"user_{to_user_id}_cloudpets_plans", pl, ttl=300)
+                    await redis_cache.set(build_user_cache_key(to_user_id, "cloudpets_plans"), pl, ttl=300)
         logger.info(f"[ShareAccept] 缓存预热完成: from={from_user_id}, to={to_user_id}, platforms={platforms}")
     except Exception as e:
         logger.warning(f"[ShareAccept] 缓存预热失败（非致命）: {e}")
@@ -285,7 +290,7 @@ async def accept_share(request: AcceptShareRequest, current_user: User = Depends
         pass
     try:
         from backend.app.utils.redis_cache import redis_cache
-        await redis_cache.delete(f"shared_creds:user_{to_user_id}")
+        await redis_cache.delete(build_shared_creds_cache_key(to_user_id))
     except Exception:
         pass
 
@@ -370,7 +375,7 @@ async def update_share_expiry(request: UpdateExpiryRequest, current_user: User =
                 from backend.app.utils.device_cache import device_cache
                 await device_cache.invalidate_user(share.to_user_id)
                 from backend.app.utils.redis_cache import redis_cache
-                await redis_cache.delete(f"shared_creds:user_{share.to_user_id}")
+                await redis_cache.delete(build_shared_creds_cache_key(share.to_user_id))
             except Exception:
                 pass
 
@@ -390,7 +395,7 @@ async def update_share_expiry(request: UpdateExpiryRequest, current_user: User =
             from backend.app.utils.device_cache import device_cache
             await device_cache.invalidate_user(share.to_user_id)
             from backend.app.utils.redis_cache import redis_cache
-            await redis_cache.delete(f"shared_creds:user_{share.to_user_id}")
+            await redis_cache.delete(build_shared_creds_cache_key(share.to_user_id))
         except Exception:
             pass
 
@@ -438,7 +443,7 @@ async def check_expired_shares(request: CheckExpiredRequest, current_user: User 
         from backend.app.utils.redis_cache import redis_cache
         for uid in to_users:
             await device_cache.invalidate_user(uid)
-            await redis_cache.delete(f"shared_creds:user_{uid}")
+            await redis_cache.delete(build_shared_creds_cache_key(uid))
     except Exception:
         pass
 
@@ -543,7 +548,8 @@ async def revoke_share(share_id: int, current_user: User = Depends(_get_current_
             pass
         try:
             from backend.app.utils.redis_cache import redis_cache
-            await redis_cache.delete(f"shared_creds:user_{share.to_user_id}")
+            # 【修复】使用标准的缓存Key构建器，确保Key格式一致
+            await redis_cache.delete(build_shared_creds_cache_key(share.to_user_id))
         except Exception:
             pass
 
