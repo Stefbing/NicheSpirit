@@ -2330,7 +2330,9 @@ async def add_device_api(request: AddDeviceRequest, current_user: User = Depends
         # 【修复】设备新增可能改变"首个配置用户"，使缓存同步失效
         if request.platform in ('petkit', 'cloudpets'):
             await redis_cache.delete(f"first_user:platform:{request.platform}")
-        logger.info(f"[AddDevice] 缓存已清除: user={uid}")
+        # 【修复】失效Dashboard缓存，确保返回主页时能看到新设备
+        await redis_cache.delete(f"dashboard:user_{uid}")
+        logger.info(f"[AddDevice] 缓存已清除: user={uid}, dashboard_cache=已失效")
 
         return DeviceResponse(
             device_key=device_key,
@@ -2407,7 +2409,10 @@ async def delete_device_api(device_key: str, current_user: User = Depends(get_cu
         platform = device_key.split('_')[0] if '_' in device_key else device_key
         if platform in ('petkit', 'cloudpets'):
             await redis_cache.delete(f"first_user:platform:{platform}")
-        logger.info(f"Cleared all caches for user {uid} after device deletion")
+        # 【修复】失效Dashboard缓存和共享凭据缓存
+        await redis_cache.delete(f"dashboard:user_{uid}")
+        await redis_cache.delete(build_shared_creds_cache_key(uid))
+        logger.info(f"[DeleteDevice] 缓存已清除: user={uid}, dashboard_cache=已失效, shared_creds=已失效")
 
         return {"status": "success", "message": "设备删除成功", "device_key": device_key}
     except HTTPException:

@@ -293,6 +293,14 @@ async def accept_share(request: AcceptShareRequest, current_user: User = Depends
         await redis_cache.delete(build_shared_creds_cache_key(to_user_id))
     except Exception:
         pass
+    
+    # 【修复】失效Dashboard缓存，确保接受者能看到新分享的设备
+    try:
+        from backend.app.utils.redis_cache import redis_cache
+        await redis_cache.delete(f"dashboard:user_{to_user_id}")
+        logger.info(f"[AcceptShare] Dashboard缓存已失效: to_user={to_user_id}")
+    except Exception:
+        pass
 
     return {
         "success": True,
@@ -550,6 +558,13 @@ async def revoke_share(share_id: int, current_user: User = Depends(_get_current_
             from backend.app.utils.redis_cache import redis_cache
             # 【修复】使用标准的缓存Key构建器，确保Key格式一致
             await redis_cache.delete(build_shared_creds_cache_key(share.to_user_id))
+        except Exception:
+            pass
+        # 【修复】失效Dashboard缓存，确保被分享者不再看到已撤销的设备
+        try:
+            from backend.app.utils.redis_cache import redis_cache
+            await redis_cache.delete(f"dashboard:user_{share.to_user_id}")
+            logger.info(f"[RevokeShare] Dashboard缓存已失效: to_user={share.to_user_id}")
         except Exception:
             pass
 
