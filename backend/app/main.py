@@ -1500,6 +1500,21 @@ async def _invalidate_cloudpets_owner_caches(owner_id: int, actor_user_id: int):
     await _sync_all_shared_caches("cloudpets", actor_user_id)
 
 
+async def _write_through_cloudpets_plans(actor_user_id: int, plans: list, ttl: int = 300):
+    """
+    【写入式缓存】将最新的计划列表写入 actor 和 owner 的缓存 key。
+    替代 _invalidate_cloudpets_owner_caches 的"删除全部"策略。
+    """
+    try:
+        from backend.app.utils.redis_cache import redis_cache
+        cache_key = f"user_{actor_user_id}_cloudpets_plans"
+        await redis_cache.set(cache_key, plans, ttl=ttl)
+        await _warm_owner_cache_if_shared(actor_user_id, "cloudpets", cache_key, plans)
+        logger.info(f"[WriteCache] CloudPets plans 已写入: actor={actor_user_id}, count={len(plans) if plans else 0}")
+    except Exception as e:
+        logger.warning(f"[WriteCache] CloudPets plans 写入失败（保留原数据）: {e}")
+
+
 @app.post("/api/cloudpets/plans", response_model=CloudPetsPlan)
 async def cloudpets_add_plan(plan: CloudPetsPlan, current_user: User = Depends(get_current_user)):
     """Add feeding plan for current user"""
@@ -1514,9 +1529,17 @@ async def cloudpets_add_plan(plan: CloudPetsPlan, current_user: User = Depends(g
         finally:
             await _release_service(service, is_temp)
 
-        owner_id = await _get_first_user_with_platform("cloudpets")
-        if owner_id:
-            await _invalidate_cloudpets_owner_caches(owner_id, user_id)
+        # 【写入式缓存】新增计划后立即重新获取最新计划列表并缓存
+        # 替代 _invalidate_cloudpets_owner_caches（删除全部）
+        if result:
+            fresh_service, fresh_is_temp = await _get_cloudpets_for_user(user_id)
+            if fresh_service:
+                try:
+                    fresh_plans = await fresh_service.get_feeding_plans()
+                    if isinstance(fresh_plans, list):
+                        await _write_through_cloudpets_plans(user_id, fresh_plans)
+                finally:
+                    await _release_service(fresh_service, fresh_is_temp)
         return result
     except HTTPException:
         raise
@@ -1537,9 +1560,17 @@ async def cloudpets_update_plan(plan_id: str, plan: CloudPetsPlan, current_user:
         finally:
             await _release_service(service, is_temp)
 
-        owner_id = await _get_first_user_with_platform("cloudpets")
-        if owner_id:
-            await _invalidate_cloudpets_owner_caches(owner_id, user_id)
+        # 【写入式缓存】更新计划后立即重新获取最新计划列表并缓存
+        # 替代 _invalidate_cloudpets_owner_caches（删除全部）
+        if result:
+            fresh_service, fresh_is_temp = await _get_cloudpets_for_user(user_id)
+            if fresh_service:
+                try:
+                    fresh_plans = await fresh_service.get_feeding_plans()
+                    if isinstance(fresh_plans, list):
+                        await _write_through_cloudpets_plans(user_id, fresh_plans)
+                finally:
+                    await _release_service(fresh_service, fresh_is_temp)
         return result
     except HTTPException:
         raise
@@ -1560,9 +1591,16 @@ async def cloudpets_delete_plan(plan_id: str, current_user: User = Depends(get_c
         finally:
             await _release_service(service, is_temp)
 
-        owner_id = await _get_first_user_with_platform("cloudpets")
-        if owner_id:
-            await _invalidate_cloudpets_owner_caches(owner_id, user_id)
+        # 【写入式缓存】删除计划后立即重新获取最新计划列表并缓存
+        if result:
+            fresh_service, fresh_is_temp = await _get_cloudpets_for_user(user_id)
+            if fresh_service:
+                try:
+                    fresh_plans = await fresh_service.get_feeding_plans()
+                    if isinstance(fresh_plans, list):
+                        await _write_through_cloudpets_plans(user_id, fresh_plans)
+                finally:
+                    await _release_service(fresh_service, fresh_is_temp)
         return result
     except HTTPException:
         raise
