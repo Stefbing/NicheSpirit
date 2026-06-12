@@ -399,6 +399,103 @@ async def _warm_owner_cache_if_shared(actor_user_id: int, platform: str, actor_c
         logger.warning(f"[CacheWarm] 预热失败（非致命）: {e}")
 
 
+async def _update_petkit_cache_after_operation(owner_user_id: int, actor_user_id: int, device_id: str, action: str):
+    """
+    【写入式缓存】设备操作成功后，在缓存中更新受影响设备的字段，替代清空所有缓存。
+
+    策略：
+    1. 读取 owner 的权威缓存 `user_{owner}_petkit_devices`
+    2. 找到 device_id 对应的设备，更新其 state_summary 中的操作相关字段
+    3. 写回 owner 缓存
+    4. 同时更新操作者（actor）的缓存（如果是共享用户）
+
+    这样所有用户在 Dashboard 上看到的设备不再是"空"的，
+    而是能立即看到操作后的状态（如工作状态变为 cleaning）。
+    """
+    try:
+        from backend.app.utils.redis_cache import redis_cache
+        owner_key = f"user_{owner_user_id}_petkit_devices"
+        cached = await redis_cache.get(owner_key)
+        if not cached or not isinstance(cached, list):
+            logger.debug(f"[WriteCache] 无缓存可更新（skip）: owner={owner_user_id}")
+            return
+
+        updated = False
+        for dev in cached:
+            if not isinstance(dev, dict):
+                continue
+            if str(dev.get('id', '')) == str(device_id):
+                # 更新受影响的状态字段
+                if 'state_summary' not in dev or not isinstance(dev['state_summary'], dict):
+                    dev['state_summary'] = {}
+                dev['state_summary']['last_action'] = action
+                dev['state_summary']['work_state'] = action
+                dev['updated_at'] = int(time.time() * 1000)
+                updated = True
+                logger.info(
+                    f"[WriteCache] 更新设备 {device_id} 缓存状态: "
+                    f"action={action}, owner={owner_user_id}"
+                )
+                break
+
+        if not updated:
+            logger.debug(f"[WriteCache] 未找到设备 {device_id} 或无需更新")
+            return
+
+        # 写回 owner 缓存（保持原 TTL 不变，使用 set 不带 ttl 不会刷新 TTL
+        # 所以用 get 现 TTL 再 set... 简化起见，用默认 TTL 300s）
+        await redis_cache.set(owner_key, cached, ttl=300)
+
+        # 如果是共享用户操作，也更新 actor 的缓存
+        if actor_user_id != owner_user_id:
+            actor_key = f"user_{actor_user_id}_petkit_devices"
+            await redis_cache.set(actor_key, cached, ttl=300)
+            logger.debug(f"[WriteCache] 同步更新 actor {actor_user_id} 缓存")
+
+        # 失效共享凭据缓存（确保共享用户下次读取时看到最新 state）
+        from backend.app.utils.redis_cache import redis_cache as _rc
+        await _invalidate_shared_caches(owner_user_id, "petkit")
+
+    except Exception as e:
+        logger.warning(f"[WriteCache] 缓存更新失败（保留原数据）: {e}")
+
+
+async def _update_cloudpets_servings_cache_after_feed(actor_user_id: int, amount: int):
+    """
+    【写入式缓存】CloudPets 投喂成功后，递增缓存中的今日投喂次数。
+
+    不删除缓存，原地更新 servings 计数，使 Dashboard 立即反映新的投喂次数。
+    """
+    try:
+        from backend.app.utils.redis_cache import redis_cache
+        cache_key = f"user_{actor_user_id}_cloudpets_servings"
+        cached = await redis_cache.get(cache_key)
+        if cached is not None:
+            if isinstance(cached, dict):
+                current = int(cached.get("result", 0))
+                cached["result"] = current + amount
+                await redis_cache.set(cache_key, cached, ttl=120)
+                logger.info(f"[WriteCache] 投喂缓存递增: {current} → {cached['result']}")
+
+        # 如果是共享用户，也更新所有者的缓存
+        shared_creds_key = f"shared_creds:user_{actor_user_id}"
+        creds = await redis_cache.get(shared_creds_key)
+        if creds and "cloudpets" in creds:
+            owner_id = await _get_first_user_with_platform("cloudpets")
+            if owner_id and owner_id != actor_user_id:
+                owner_key = f"user_{owner_id}_cloudpets_servings"
+                owner_cached = await redis_cache.get(owner_key)
+                if owner_cached is not None:
+                    if isinstance(owner_cached, dict):
+                        current = int(owner_cached.get("result", 0))
+                        owner_cached["result"] = current + amount
+                        await redis_cache.set(owner_key, owner_cached, ttl=120)
+                        logger.info(f"[WriteCache] 所有者投喂缓存递增: {current} → {owner_cached['result']}")
+
+    except Exception as e:
+        logger.warning(f"[WriteCache] CloudPets 投喂缓存更新失败（保留原数据）: {e}")
+
+
 # 静态页面路由已全部移除（前端使用微信小程序原生页面）
 # --- Dashboard API ---
 async def _get_shared_platform_credentials(user_id: int) -> dict:
@@ -1139,8 +1236,13 @@ async def petkit_clean(current_user: User = Depends(get_current_user)):
 
         try:
             result = await service.clean_litterbox(None)
-            # 【统一缓存同步】清洗后完全同步所有相关用户缓存
-            await _sync_all_shared_caches("petkit", user_id)
+            # 【写入式缓存】不删除所有缓存，而是更新受影响设备的缓存状态
+            if result and result.get("device_id"):
+                owner_id = await _get_first_user_with_platform("petkit")
+                if owner_id:
+                    await _update_petkit_cache_after_operation(
+                        owner_id, user_id, result["device_id"], result.get("action", "clean")
+                    )
             return result
         finally:
             await _release_service(service, is_temp)
@@ -1160,8 +1262,13 @@ async def petkit_deodorize(current_user: User = Depends(get_current_user)):
 
         try:
             result = await service.deodorize_litterbox(None)
-            # 【统一缓存同步】除臭后完全同步所有相关用户缓存
-            await _sync_all_shared_caches("petkit", user_id)
+            # 【写入式缓存】不删除所有缓存，而是更新受影响设备的缓存状态
+            if result and result.get("device_id"):
+                owner_id = await _get_first_user_with_platform("petkit")
+                if owner_id:
+                    await _update_petkit_cache_after_operation(
+                        owner_id, user_id, result["device_id"], result.get("action", "deodorize")
+                    )
             return result
         finally:
             await _release_service(service, is_temp)
@@ -1345,9 +1452,8 @@ async def cloudpets_manual_feed(amount: int = 1, current_user: User = Depends(ge
 
         try:
             result = await service.manual_feed(amount)
-            # 【统一缓存同步】投喂后完全同步所有相关用户缓存
-            # 无论A还是B执行投喂，都确保所有分享者看到最新数据
-            await _sync_all_shared_caches("cloudpets", user_id)
+            # 【写入式缓存】投喂成功后，递增缓存中的今日投喂次数，不删除整个缓存
+            await _update_cloudpets_servings_cache_after_feed(user_id, amount)
             return result
         finally:
             await _release_service(service, is_temp)
