@@ -830,23 +830,20 @@ Page({
         path: `/api/family-members?user_id=${this.data.userInfo.user_id}`,
         method: 'GET'
       })
-      
+
       const members = Array.isArray(membersRes.data) ? membersRes.data : (Array.isArray(membersRes) ? membersRes : [])
-      
-      // 逐个软删除（设置is_active=false）
+
+      // 【修复】原代码错误使用 PUT 携带 is_active:false，但后端 PUT 不接受此字段
+      // 改为调用 DELETE 端点（DELETE /api/family-members/{id} 是后端专门的软删除接口）
       for (const member of members) {
         await cloudRequest.callContainer({
           path: `/api/family-members/${member.id}?user_id=${this.data.userInfo.user_id}`,
-          method: 'PUT',
-          data: {
-            ...member,
-            is_active: false
-          }
+          method: 'DELETE'
         }).catch(err => {
           console.warn(`[假删成员] 成员 ${member.name} 删除失败:`, err)
         })
       }
-      
+
       console.log('[假删成员] 已软删除', members.length, '个成员')
     } catch (err) {
       console.error('[假删成员] 失败:', err)
@@ -894,13 +891,22 @@ Page({
           wx.removeStorageSync('userInfo')
           wx.removeStorageSync('token')
           wx.removeStorageSync('preventSilentLogin')
-          this.setData({ 
+          // 【修复】清理待处理的分享 token，防止下个用户登入后误触发
+          app.globalData._pendingShareToken = ''
+          app.globalData._pendingShareScene = 0
+          // 【修复】清理刷新 token 刷新状态，避免下次登录时复用 stale Promise
+          try {
+            if (cloudRequest && cloudRequest.resetRefreshState) {
+              cloudRequest.resetRefreshState()
+            }
+          } catch (e) {}
+          this.setData({
             userInfo: null,
             userDevices: [],
             petDevices: [],
             healthDevices: []
           })
-          
+
           // 导航到登录页（携带 fromLogout 参数）
           wx.reLaunch({ url: '/pages/login/login?fromLogout=1' })
         }

@@ -501,12 +501,29 @@ async def _get_cp_user_for_dashboard(request_user_id: int, user_platforms: dict,
 _GLOBAL_CONFIG_KEYS = ["WECHAT_APPID", "WECHAT_SECRET", "TOKEN_EXPIRE_HOURS"]
 _GLOBAL_CONFIG_REDIS_KEY = "global_configs"
 
+# 【Token 自动续期阈值】当 token 距离过期不足该值时，自动延长到完整生命周期
+# 默认 24 小时 - 即"距离过期还剩不到 24 小时就续期"，保证活跃用户几乎不会遇到 401
+_TOKEN_REFRESH_THRESHOLD_MS = 24 * 3600 * 1000
+
+# 【性能优化】token 过期毫秒数本地缓存（5分钟），避免 get_current_user 对每个请求都访问 Redis
+_token_expire_ms_cache: Optional[int] = None
+_token_expire_ms_cache_time: int = 0
+_TOKEN_EXPIRE_CACHE_TTL_MS = 5 * 60 * 1000
+
 async def _get_token_expire_ms() -> int:
-    """从 Redis 获取 token 过期毫秒数，回退默认 720 小时"""
+    """从 Redis 获取 token 过期毫秒数（带 5 分钟本地缓存），回退默认 720 小时"""
+    global _token_expire_ms_cache, _token_expire_ms_cache_time
+    now = int(time.time() * 1000)
+    if _token_expire_ms_cache is not None and (now - _token_expire_ms_cache_time) < _TOKEN_EXPIRE_CACHE_TTL_MS:
+        return _token_expire_ms_cache
+
     from backend.app.utils.redis_cache import redis_cache
     data = await redis_cache.get(_GLOBAL_CONFIG_REDIS_KEY) or {}
     hours_str = data.get("TOKEN_EXPIRE_HOURS") or "720"
-    return int(hours_str) * 3600 * 1000
+    result_ms = int(hours_str) * 3600 * 1000
+    _token_expire_ms_cache = result_ms
+    _token_expire_ms_cache_time = now
+    return result_ms
 
 
 async def generate_session_token() -> tuple[str, str, int]:
@@ -530,11 +547,15 @@ def hash_token(token: str) -> str:
 
 async def get_current_user(
     authorization: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
 ) -> User:
     """
     从 Authorization Header 解析当前用户（替换JWT中间件）
     用法: current_user: User = Depends(get_current_user)
-    自动创建独立session，不影响调用方的session
+    通过 FastAPI DI 统一管理 session，消除 detached 对象隐患。
+
+    【Token 自动续期】当 token 距离过期不足阈值时，
+    自动延长 token_expires_at 到完整生命周期，用户无感知。
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="未登录")
@@ -543,16 +564,44 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Token为空")
     token_hash = hash_token(token)
     now = int(time.time() * 1000)
-    with Session(engine) as s:
-        user = s.exec(
-            select(User).where(
-                User.token_hash == token_hash,
-                User.token_expires_at > now,
+
+    # 使用 DI 注入的 session，与路由处理器共享同一个 session
+    user = session.exec(
+        select(User).where(User.token_hash == token_hash)
+    ).first()
+
+    if not user:
+        raise HTTPException(status_code=401, detail={
+            "code": "TOKEN_INVALID",
+            "message": "Token无效或已过期",
+        })
+
+    if user.token_expires_at is None or user.token_expires_at <= now:
+        raise HTTPException(status_code=401, detail={
+            "code": "TOKEN_EXPIRED",
+            "message": "Token已过期，请重新登录",
+        })
+
+    # 【Token 自动续期 - Sliding Window】
+    try:
+        token_lifetime_ms = await _get_token_expire_ms()
+        refresh_threshold_ms = min(
+            _TOKEN_REFRESH_THRESHOLD_MS,
+            token_lifetime_ms // 4,
+        )
+        if user.token_expires_at - now < refresh_threshold_ms:
+            user.token_expires_at = now + token_lifetime_ms
+            user.updated_at = now
+            session.add(user)
+            session.commit()
+            logger.debug(
+                f"[Auth] Token 自动续期: user_id={user.id}, "
+                f"new_expiry_in={token_lifetime_ms // 3600000}h"
             )
-        ).first()
-        if not user:
-            raise HTTPException(status_code=401, detail="Token无效或已过期")
-        return user
+    except Exception as e:
+        logger.warning(f"[Auth] Token 自动续期失败（非致命）: {e}")
+
+    return user
 
 
 def hash_password(password: str) -> str:
@@ -1484,12 +1533,15 @@ async def auth_bind_login(request: BindLoginRequest, session: Session = Depends(
     else:
         # 正常绑定 / 强制改绑
         if has_conflict and request.force_bind:
-            # 清空旧用户的 openid（一对一约束）
+            # 【修复】必须先清空旧用户的 openid 并 commit，
+            # 再设置新用户的 openid，避免 UNIQUE(openid) 冲突。
+            # 此前两次写操作在同一个 commit 中存在隐式竞态。
             old_user.openid = None
             old_user.unionid = None
             old_user.session_key = None
             old_user.updated_at = int(time.time() * 1000)
             session.add(old_user)
+            session.commit()
             logger.info(f"openid 强制换绑：旧用户 {old_user.id} 的绑定已清除")
 
         # 对当前用户落库 openid
@@ -1588,6 +1640,114 @@ async def auth_silent_login(request: SilentLoginRequest, session: Session = Depe
         openid=openid,
         nickname=user.nickname,
     )
+
+
+# --- 接口 C：Token 无感刷新 ---
+class RefreshTokenRequest(BaseModel):
+    code: str  # wx.login() 返回的临时 code（用于换取 openid）
+    # 【可选】传旧 token 便于后端复用 token_hash 关系，避免无谓的 token 轮换
+    old_token: Optional[str] = None
+
+class RefreshTokenResponse(BaseModel):
+    token: str
+    user_id: int
+    phone_number: str
+    openid: str
+    nickname: Optional[str] = None
+    refreshed: bool  # True=签发了新 token, False=复用旧 token
+
+@app.post("/api/auth/refresh", response_model=RefreshTokenResponse)
+async def auth_refresh_token(request: RefreshTokenRequest, session: Session = Depends(get_session)):
+    """
+    【Token 无感刷新】专门为前端"401 静默重连"设计
+
+    流程：
+    1. 用 wx.login code 换取 openid
+    2. 通过 openid 查 user
+    3. 若前端传了 old_token 且与 DB 中的 token_hash 匹配 → 检查是否需要续期
+       - 距离过期超过阈值 → 直接返回旧 token（不轮换，避免前端缓存失效）
+       - 距离过期不足阈值 → 签发新 token 并轮换
+       - 旧 token 已被 DB 替换（其他设备刷新过）→ 签发新 token
+    4. 若未传 old_token → 走与 silent-login 一致的流程
+    """
+    code = (request.code or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="缺少微信登录凭证")
+
+    # 1. 换取 openid
+    wx_data = await wx_code2session(code)
+    openid = wx_data["openid"]
+    new_session_key = wx_data["session_key"]
+    unionid = wx_data.get("unionid")
+
+    if not openid:
+        raise HTTPException(status_code=400, detail="获取微信 OpenID 失败")
+
+    # 2. 查 user
+    user = session.exec(select(User).where(User.openid == openid)).first()
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "UNBOUND",
+                "message": "该微信尚未绑定账号，请先使用手机号+密码登录完成绑定",
+            },
+        )
+
+    now = int(time.time() * 1000)
+
+    # 3. 决定是否复用旧 token
+    refreshed = True
+    if request.old_token:
+        old_token_hash = hash_token(request.old_token)
+        if user.token_hash == old_token_hash and user.token_expires_at and user.token_expires_at > now:
+            # 旧 token 仍然有效且未被轮换 → 检查是否需要续期
+            token_lifetime_ms = await _get_token_expire_ms()
+            refresh_threshold_ms = min(_TOKEN_REFRESH_THRESHOLD_MS, token_lifetime_ms // 4)
+            if user.token_expires_at - now >= refresh_threshold_ms:
+                # 距离过期还很长 → 复用旧 token，不做无谓轮换
+                # 【修复】复用路径也延长过期时间，避免 token 因不轮换而过期
+                user.token_expires_at = now + token_lifetime_ms
+                logger.debug(
+                    f"[Auth] /refresh 复用旧 token: user_id={user.id}, "
+                    f"new_expiry_in={token_lifetime_ms // 3600000}h"
+                )
+                user.session_key = new_session_key
+                if unionid:
+                    user.unionid = unionid
+                user.updated_at = now
+                session.add(user)
+                session.commit()
+                return RefreshTokenResponse(
+                    token=request.old_token,
+                    user_id=user.id,
+                    phone_number=user.phone_number,
+                    openid=openid,
+                    nickname=user.nickname,
+                    refreshed=False,
+                )
+
+    # 4. 走 token 轮换/续期流程
+    user.session_key = new_session_key
+    if unionid:
+        user.unionid = unionid
+    raw_token, token_hash, expires_at = await generate_session_token()
+    user.token_hash = token_hash
+    user.token_expires_at = expires_at
+    user.updated_at = now
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    return RefreshTokenResponse(
+        token=raw_token,
+        user_id=user.id,
+        phone_number=user.phone_number,
+        openid=openid,
+        nickname=user.nickname,
+        refreshed=True,
+    )
+
 
 # /api/config/* 端点已废弃，设备配置管理请使用 /api/devices/* 系列 API
 

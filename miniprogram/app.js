@@ -52,6 +52,9 @@ App({
 
     // 【新增】最后数据更新时间戳（用于智能判断是否需要强制刷新）
     _lastDataUpdateTime: 0,
+
+    // 【修复】启动时 token 刷新 Promise，供 fetchDashboardData 等待
+    _startupRefreshPromise: null,
   },
 
   // 已发现的体脂秤设备列表（供绑定界面使用）
@@ -142,7 +145,7 @@ App({
    * 登录成功后初始化蓝牙等后续流程
    *
    * 逻辑：
-   * 1. 已有 token → 直接初始化蓝牙
+   * 1. 已有 token → 异步触发静默刷新延长有效期（不阻塞），同时直接初始化后续流程
    * 2. 无 token 但 preventSilentLogin=true → 跳登录页并进入"本账号密码登录"模式
    * 3. 无 token 且未禁止静默 → 尝试 openid 静默登录
    */
@@ -155,6 +158,28 @@ App({
       console.log('[App] 已有登录态，user_id:', userInfo.user_id);
       console.log('[App] 启动路径:', this.globalData._launchPath,
         '| pendingToken:', this.globalData._pendingShareToken ? '有' : '无');
+
+      // 【Token 无感刷新】后台异步尝试延长 token 有效期（不阻塞启动）
+      // 若 token 实际已过期，cloud_request.js 的 401 兜底机制会处理
+      // 【修复】将 refresh 的 Promise 存储到 globalData，供 fetchDashboardData 协调
+      const cloudRequest = require('./utils/cloud_request.js');
+      const refreshPromise = cloudRequest.silentRefreshToken();
+      this.globalData._startupRefreshPromise = refreshPromise;
+      refreshPromise
+        .then(({ refreshed }) => {
+          if (refreshed) {
+            console.log('[App] ✅ 启动时已静默刷新 token');
+          } else {
+            console.log('[App] ✅ token 仍有效，无需刷新');
+          }
+        })
+        .catch((err) => {
+          // 静默失败不影响主流程，下一次请求失败时由 cloud_request.js 兜底
+          console.warn('[App] ⚠️ 启动时静默刷新失败（不影响主流程）:', err);
+        })
+        .finally(() => {
+          this.globalData._startupRefreshPromise = null;
+        });
 
       // 【修复】关键：如果入口路径已经是 pages/index/index（分享卡片/正常启动），
       // 不需要 reLaunch。让微信系统自然创建页面，避免 reLaunch 清空 URL 参数。
@@ -195,6 +220,7 @@ App({
     this.globalData.dashboardFetching = false;
     this.globalData.dashboardFetchPromise = null;
     this.globalData._staleKeys = new Set();
+    this.globalData._startupRefreshPromise = null;  // 【修复】清理启动刷新 Promise
     console.log('[App] 🧹 Dashboard 缓存已硬清除（仅登出场景使用）');
   },
 
@@ -276,6 +302,19 @@ App({
    */
   async fetchDashboardData(userId, timeout = 15000, forceRefresh = false) {
     const g = this.globalData;
+
+    // 【修复】如果启动时 token 刷新仍在进行中，等待完成后再发起请求
+    // 避免旧 token 发起的请求触发 401 需要二次刷新
+    if (g._startupRefreshPromise) {
+      console.log('[App] ⏳ 等待启动时 token 刷新完成后再请求 Dashboard...');
+      try {
+        await g._startupRefreshPromise;
+        console.log('[App] ✅ token 刷新已完成，继续 Dashboard 请求');
+      } catch (e) {
+        console.warn('[App] ⚠️ 启动时 token 刷新已失败（Dashboard 仍将尝试）:', e);
+      }
+    }
+
     const hasStaleKeys = g._staleKeys && g._staleKeys.size > 0;
 
     // 【智能缓存过期时间计算】
