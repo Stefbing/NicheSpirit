@@ -150,6 +150,26 @@
   background: rgba(102, 126, 234, 0.08);
 }
 
+/* 【新增】共享设备卡片 — 取消点击高亮，降低透明度 */
+.setting-card-shared {
+  opacity: 0.65;
+}
+.setting-card-shared:active {
+  background: transparent;
+}
+
+/* 【新增】共享设备标签 */
+.shared-badge {
+  font-size: 18rpx;
+  background: rgba(16, 185, 129, 0.15);
+  color: #10B981;
+  padding: 2rpx 10rpx;
+  border-radius: 8rpx;
+  margin-left: 8rpx;
+  font-weight: 500;
+  vertical-align: middle;
+}
+
 .setting-card.danger-card:active {
   background: rgba(255, 77, 79, 0.08);
 }

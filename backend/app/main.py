@@ -360,6 +360,45 @@ async def _release_service(service, is_temp):
         except Exception:
             pass
 
+
+async def _warm_owner_cache_if_shared(actor_user_id: int, platform: str, actor_cache_key: str, data: Any):
+    """
+    【修复】共享用户获取到最新数据后，同步预热所有者的权威缓存
+    确保 Dashboard（读所有者键）立即可见最新数据，无需等待所有者自行触发 API 调用。
+
+    场景：B（共享用户）调用了设备 API 获取到数据，缓存到 user_B_xxx。
+         Dashboard 读的是 user_A_xxx（所有者键），发现 MISS 则返回空。
+         此函数将 B 的最新数据复制到 user_A_xxx，使 Dashboard 命中。
+
+    参数:
+        actor_user_id: 操作者 user_id（当前请求用户）
+        platform: 平台名（"petkit" / "cloudpets"）
+        actor_cache_key: 操作者的缓存键（如 "user_B_petkit_devices"）
+        data: 要缓存的数据
+    """
+    try:
+        from backend.app.utils.redis_cache import redis_cache
+        # 先判断操作者是否是共享用户
+        shared_creds_key = f"shared_creds:user_{actor_user_id}"
+        creds = await redis_cache.get(shared_creds_key)
+        if not creds or platform not in creds:
+            return  # 不是共享用户，无需处理
+
+        owner_id = await _get_first_user_with_platform(platform)
+        if not owner_id or owner_id == actor_user_id:
+            return  # 自己就是所有者，无需处理
+
+        owner_key = actor_cache_key.replace(f"user_{actor_user_id}", f"user_{owner_id}")
+        if owner_key != actor_cache_key:
+            await redis_cache.set(owner_key, data, ttl=300)
+            logger.debug(
+                f"[CacheWarm] 共享用户 {actor_user_id} 预热所有者 {owner_id} 缓存: "
+                f"{actor_cache_key} → {owner_key}"
+            )
+    except Exception as e:
+        logger.warning(f"[CacheWarm] 预热失败（非致命）: {e}")
+
+
 # 静态页面路由已全部移除（前端使用微信小程序原生页面）
 # --- Dashboard API ---
 async def _get_shared_platform_credentials(user_id: int) -> dict:
@@ -877,19 +916,46 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
         pk_user_id = await _get_pk_user_for_dashboard(user_id, user_platforms, shared_creds)
         petkit_devices = []
         if pk_user_id:
-            cached = await redis_cache.get(f"user_{pk_user_id}_petkit_devices")
+            owner_key = f"user_{pk_user_id}_petkit_devices"
+            cached = await redis_cache.get(owner_key)
             if cached:
                 petkit_devices = _trim_petkit_payload(cached)
+            else:
+                # 【修复】所有者缓存 miss → 尝试从当前用户缓存回退
+                self_key = f"user_{user_id}_petkit_devices"
+                self_cached = await redis_cache.get(self_key)
+                if self_cached:
+                    petkit_devices = _trim_petkit_payload(self_cached)
+                    # 预热所有者缓存
+                    await redis_cache.set(owner_key, self_cached, ttl=300)
+                    logger.debug(f"[Dashboard] 从 {self_key} 回填 {owner_key}")
 
         cp_user_id = await _get_cp_user_for_dashboard(user_id, user_platforms, shared_creds)
         cloudpets_servings = {}
         cloudpets_plans = []
         if cp_user_id:
-            cached_sv = await redis_cache.get(f"user_{cp_user_id}_cloudpets_servings")
+            owner_key = f"user_{cp_user_id}_cloudpets_servings"
+            cached_sv = await redis_cache.get(owner_key)
             if cached_sv:
                 cloudpets_servings = cached_sv
-            cached_pl = await redis_cache.get(f"user_{cp_user_id}_cloudpets_plans")
+            else:
+                # 【修复】所有者缓存 miss → 从当前用户缓存回退
+                self_key = f"user_{user_id}_cloudpets_servings"
+                self_sv = await redis_cache.get(self_key)
+                if self_sv:
+                    cloudpets_servings = self_sv
+                    await redis_cache.set(owner_key, self_sv, ttl=120)
+
+            owner_key = f"user_{cp_user_id}_cloudpets_plans"
+            cached_pl = await redis_cache.get(owner_key)
             if cached_pl:
+                cloudpets_plans = cached_pl
+            else:
+                self_key = f"user_{user_id}_cloudpets_plans"
+                self_pl = await redis_cache.get(self_key)
+                if self_pl:
+                    cloudpets_plans = self_pl
+                    await redis_cache.set(owner_key, self_pl, ttl=300)
                 cloudpets_plans = cached_pl
 
         dashboard_data['petkit_devices'] = petkit_devices
@@ -1050,8 +1116,11 @@ async def petkit_devices(current_user: User = Depends(get_current_user)):
 
         try:
             devices = await service.get_devices()
-            # 写缓存
+            # 写当前用户缓存
             await redis_cache.set(f"user_{user_id}_petkit_devices", devices, ttl=300)
+            # 【修复】共享用户获取数据后，同步写入所有者的权威缓存
+            # 确保 Dashboard（读所有者键）立即可见
+            await _warm_owner_cache_if_shared(user_id, "petkit", f"user_{user_id}_petkit_devices", devices)
             return devices
         finally:
             await _release_service(service, is_temp)
@@ -1258,6 +1327,8 @@ async def cloudpets_servings_today(current_user: User = Depends(get_current_user
             logger.warning(f"[Cache] 跳过缓存 CloudPets 错误响应: code={result.get('code')}, msg={result.get('message')}")
         else:
             await redis_cache.set(cache_key, result, ttl=120)
+            # 【修复】共享用户预热所有者权威缓存
+            await _warm_owner_cache_if_shared(user_id, "cloudpets", cache_key, result)
         return result
     except Exception as e:
         logger.error(f"Failed to get servings: {e}")
@@ -1306,10 +1377,13 @@ async def cloudpets_get_plans(current_user: User = Depends(get_current_user)):
 
         if isinstance(plans, list) and len(plans) > 0:
             await redis_cache.set(cache_key, plans, ttl=300)
+            # 【修复】共享用户预热所有者权威缓存
+            await _warm_owner_cache_if_shared(user_id, "cloudpets", cache_key, plans)
         elif isinstance(plans, dict) and str(plans.get("code")) in ("401", "500", "403"):
             logger.warning(f"[Cache] 跳过缓存 CloudPets 计划错误响应: code={plans.get('code')}")
         else:
             await redis_cache.set(cache_key, plans, ttl=60)
+            await _warm_owner_cache_if_shared(user_id, "cloudpets", cache_key, plans)
         return plans
     except Exception as e:
         logger.error(f"Failed to get plans: {e}")

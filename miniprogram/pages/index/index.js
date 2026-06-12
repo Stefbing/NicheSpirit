@@ -1002,6 +1002,12 @@ Page({
    * 确认分享后，调用后端创建分享记录，然后触发微信原生分享
    */
   async doShare() {
+    // 【修复】防重复点击：正在分享中则跳过
+    if (this._sharingInProgress) {
+      console.warn('[Share] ⚠️ 分享正在进行中，忽略重复点击')
+      return
+    }
+
     const userInfo = this.data.userInfo || wx.getStorageSync('userInfo')
     if (!userInfo || !userInfo.user_id) {
       wx.showToast({ title: '请先登录', icon: 'none' })
@@ -1018,6 +1024,7 @@ Page({
       return
     }
 
+    this._sharingInProgress = true
     try {
       // 调用后端创建分享
       const res = await cloudRequest.callContainer({
@@ -1026,6 +1033,8 @@ Page({
         data: {
           device_keys: allKeys,
         },
+        // 【修复】分享创建设置较短超时（15s），避免用户等待过久
+        timeout: 15000,
       })
 
       if (res && res.share_token) {
@@ -1038,6 +1047,8 @@ Page({
       console.error('[Share] 创建分享失败:', err)
       wx.showToast({ title: '分享创建失败', icon: 'none' })
       this.setData({ showShareConfirm: false })
+    } finally {
+      this._sharingInProgress = false
     }
   },
 
@@ -1055,8 +1066,14 @@ Page({
 
     // 如果是从右上角菜单转发（无 token），异步创建分享记录 + 携带 from_uid
     if (!token && userInfo) {
-      // 【修复】异步创建后台分享记录，确保 B 的 from_uid 兜底查询能找到
-      this._createShareAsync(userId, userName)
+      // 【修复】如果 doShare 正在进行中，避免 _createShareAsync 重复创建
+      if (this._sharingInProgress) {
+        console.log('[Share] ⏳ doShare 正在进行中，跳过 _createShareAsync')
+        // 不创建额外分享，仅发送 from_uid 链接（等 doShare 完成后 B 能查到）
+      } else {
+        // 【修复】异步创建后台分享记录，确保 B 的 from_uid 兜底查询能找到
+        this._createShareAsync(userId, userName)
+      }
       return this._buildMenuShareCard(userName, userId)
     }
 

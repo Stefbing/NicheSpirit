@@ -16,6 +16,13 @@ Page({
     userId: null,
     nickname: '',
     deviceList: [],
+    // 【修复】账号编辑弹窗
+    showEditAccountModal: false,
+    editAccountPlatform: '',
+    editAccountLabel: '',
+    editAccountValue: '',
+    editPasswordValue: '',
+    editIsSaving: false,
     // 分享管理
     shareList: [],
     shareListLoading: false,
@@ -52,6 +59,7 @@ Page({
 
   /**
    * 加载各平台设备配置状态
+   * 【修复】从 dashboardData.device_platforms 提取 is_shared 标识
    */
   async loadDeviceConfigStatus() {
     const userId = this.data.userId;
@@ -67,28 +75,42 @@ Page({
       const app = getApp();
       const dashboardData = await app.fetchDashboardData(userId);
 
+      // 【修复】从 device_platforms 构建平台归属映射
+      const platformInfoMap = {};
+      (dashboardData.device_platforms || []).forEach(p => {
+        platformInfoMap[p.platform] = {
+          is_shared: p.is_shared || false,
+          is_complete: p.is_complete || false,
+        };
+      });
+
       const deviceList = platforms.map(p => {
+        const info = platformInfoMap[p.platform] || {};
         let configured = false;
-        let maskedAccount = '';
 
         if (p.platform === 'xiaomi') {
-          configured = dashboardData.xiaomi_config === true;
+          configured = info.is_complete || dashboardData.xiaomi_config === true;
         } else if (p.platform === 'cloudpets') {
           const servings = dashboardData.cloudpets_servings;
-          configured = servings && Object.keys(servings).length > 0;
+          configured = info.is_complete || (servings && Object.keys(servings).length > 0);
         } else if (p.platform === 'petkit') {
           const devices = dashboardData.petkit_devices;
-          configured = devices && devices.length > 0;
+          configured = info.is_complete || (devices && devices.length > 0);
         }
 
-        return { ...p, configured, maskedAccount };
+        return {
+          ...p,
+          configured,
+          maskedAccount: '',
+          is_shared: info.is_shared || false,
+        };
       });
 
       this.setData({ deviceList });
     } catch (err) {
       console.error('[Settings] 加载设备配置状态失败:', err);
       this.setData({
-        deviceList: platforms.map(p => ({ ...p, configured: false, maskedAccount: '' })),
+        deviceList: platforms.map(p => ({ ...p, configured: false, maskedAccount: '', is_shared: false })),
       });
     }
   },
@@ -378,9 +400,92 @@ Page({
     }
   },
 
-  // ====== 功能区二事件 ======
+  // ====== 设备账号密码维护（自购设备 vs 共享设备） ======
 
-  onEditDeviceConfig() {
-    wx.showToast({ title: '请在首页管理设备配置', icon: 'none' });
+  /**
+   * 点击设备配置卡片的处理入口
+   * - 自购设备（is_shared=false）：弹出编辑弹窗
+   * - 共享设备（is_shared=true）：提示不可编辑
+   */
+  onEditDeviceConfig(e) {
+    const platform = e.currentTarget.dataset.platform;
+    const device = this.data.deviceList.find(d => d.platform === platform);
+    if (!device) return;
+
+    if (device.is_shared) {
+      wx.showToast({ title: '共享设备无需维护账号密码', icon: 'none' });
+      return;
+    }
+
+    // 自购设备 → 弹出账号密码编辑弹窗
+    this.setData({
+      showEditAccountModal: true,
+      editAccountPlatform: platform,
+      editAccountLabel: device.label,
+      editAccountValue: device.maskedAccount || '',
+      editPasswordValue: '',
+      editIsSaving: false,
+    });
+  },
+
+  onEditAccountInput(e) {
+    this.setData({ editAccountValue: e.detail.value });
+  },
+
+  onEditPasswordInput(e) {
+    this.setData({ editPasswordValue: e.detail.value });
+  },
+
+  closeEditAccountModal() {
+    this.setData({ showEditAccountModal: false });
+  },
+
+  /**
+   * 保存设备账号密码（直接调用已认证的 POST /api/devices/add）
+   * 不跳转首页，在设置页内完成维护
+   */
+  async confirmEditAccount() {
+    const { editAccountPlatform, editAccountValue, editPasswordValue, userId } = this.data;
+
+    if (!editAccountValue || !editPasswordValue) {
+      wx.showToast({ title: '请填写账号和密码', icon: 'none' });
+      return;
+    }
+
+    this.setData({ editIsSaving: true });
+    wx.showLoading({ title: '保存中…', mask: true });
+
+    try {
+      const isScale = editAccountPlatform === 'xiaomi';
+      const path = isScale
+        ? `/api/devices/scale/bind?user_id=${userId}`
+        : '/api/devices/add';
+
+      await cloudRequest.callContainer({
+        path,
+        method: 'POST',
+        data: isScale
+          ? { device_id: editAccountValue, device_name: editPasswordValue || 'MIBFS' }
+          : {
+              device_type: editAccountPlatform,
+              platform: editAccountPlatform,
+              account: editAccountValue,
+              password: editPasswordValue,
+            },
+      });
+
+      wx.hideLoading();
+      wx.showToast({ title: '账号更新成功', icon: 'success', duration: 1500 });
+      this.closeEditAccountModal();
+
+      // 刷新设备状态
+      this.loadDeviceConfigStatus();
+    } catch (err) {
+      wx.hideLoading();
+      const msg = err?.data?.detail || err?.errMsg || '保存失败，请检查账号密码后重试';
+      wx.showToast({ title: msg, icon: 'none' });
+    } finally {
+      this.setData({ editIsSaving: false });
+    }
   },
 });

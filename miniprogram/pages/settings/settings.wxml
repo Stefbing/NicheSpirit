@@ -69,18 +69,26 @@
 
     <view class="section-cards">
       <block wx:for="{{deviceList}}" wx:key="platform">
-        <view class="setting-card" bindtap="onEditDeviceConfig" data-platform="{{item.platform}}">
+        <!-- 【修复】自购设备（is_shared=false）→ 可点击编辑账号密码 -->
+        <!-- 共享设备（is_shared=true）→ 取消点击跳转，仅展示状态 -->
+        <view class="setting-card {{item.is_shared ? 'setting-card-shared' : ''}}"
+               bindtap="{{item.is_shared ? '' : 'onEditDeviceConfig'}}"
+               data-platform="{{item.platform}}">
           <view class="card-left">
             <view class="icon-wrap" style="background: {{item.iconBg}};">
               <text class="icon-text">{{item.icon}}</text>
             </view>
             <view class="card-body">
-              <text class="card-title">{{item.label}}</text>
-              <text class="card-desc" wx:if="{{item.configured}}">已配置</text>
+              <text class="card-title">
+                {{item.label}}
+                <text wx:if="{{item.is_shared}}" class="shared-badge">共享</text>
+              </text>
+              <text class="card-desc" wx:if="{{item.configured && !item.is_shared}}">已配置，点击修改</text>
+              <text class="card-desc" wx:elif="{{item.configured && item.is_shared}}">共享设备，无需维护</text>
               <text class="card-desc" wx:else>未配置</text>
             </view>
           </view>
-          <text class="card-arrow">›</text>
+          <text class="card-arrow" wx:if="{{!item.is_shared}}">›</text>
         </view>
       </block>
     </view>
@@ -190,6 +198,32 @@
       <view class="share-btn-row">
         <button class="submit-btn" bindtap="confirmUpdateExpiry">确认更新</button>
         <button class="share-cancel-btn" bindtap="closeExpiryModal">取消</button>
+      </view>
+    </view>
+  </view>
+
+  <!-- 设备账号编辑弹窗（自购设备） -->
+  <view wx:if="{{showEditAccountModal}}" class="modal-mask" bindtap="closeEditAccountModal">
+    <view class="modal-box" catchtap="stopPropagation">
+      <view class="modal-title">维护{{editAccountLabel}}账号</view>
+      <view class="modal-desc">直接在此更新设备登录凭据</view>
+
+      <view class="form-group">
+        <text class="form-label">设备账号</text>
+        <input class="form-input" placeholder="请输入账号"
+               value="{{editAccountValue}}" bindinput="onEditAccountInput" />
+      </view>
+
+      <view class="form-group">
+        <text class="form-label">密码</text>
+        <input class="form-input" type="password" placeholder="请输入密码"
+               value="{{editPasswordValue}}" bindinput="onEditPasswordInput" />
+      </view>
+
+      <view class="share-btn-row">
+        <button class="submit-btn" bindtap="confirmEditAccount"
+                disabled="{{editIsSaving}}">保存更新</button>
+        <button class="share-cancel-btn" bindtap="closeEditAccountModal">取消</button>
       </view>
     </view>
   </view>
