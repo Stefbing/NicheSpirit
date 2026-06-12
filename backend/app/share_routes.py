@@ -11,9 +11,9 @@ from backend.app.models.models import User, DeviceShare, SharedDeviceConfig, Sys
 from backend.app.models.db import get_session
 
 # 【惰性导入】避免与 main.py 的 from share_routes import router 形成循环导入
-async def _get_current_user(authorization: Optional[str] = Header(None)):
+async def _get_current_user(authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
     from backend.app.main import get_current_user
-    return await get_current_user(authorization)
+    return await get_current_user(authorization, session)
 
 
 router = APIRouter(prefix="/api/share", tags=["share"])
