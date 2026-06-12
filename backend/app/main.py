@@ -964,6 +964,7 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
         # ── 1. 设备平台列表（DeviceCache → Redis） ──
         from backend.app.utils.device_cache import device_cache
         user_platforms = await device_cache.get_user_platforms(user_id)
+        logger.info(f"[CacheLog] user={user_id} device_cache platforms={list(user_platforms.keys())}")
 
         dashboard_data['device_platforms'] = [
             {
@@ -981,7 +982,11 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
             shared_creds = await _get_shared_platform_credentials(user_id)
             # 【修复】空结果仅缓存 10s（避免写入后 60s 内查询不到），非空缓存 60s
             empty_ttl = 10
-            await redis_cache.set(shared_cache_key, shared_creds, ttl=empty_ttl if not shared_creds else 60)
+            cache_ttl = empty_ttl if not shared_creds else 60
+            await redis_cache.set(shared_cache_key, shared_creds, ttl=cache_ttl)
+            logger.info(f"[CacheLog] user={user_id} shared_creds MISS → DB查询完成 keys={list(shared_creds.keys()) if shared_creds else '空'} TTL={cache_ttl}s")
+        else:
+            logger.info(f"[CacheLog] user={user_id} shared_creds HIT key={shared_cache_key} keys={list(shared_creds.keys()) if shared_creds else '空'}")
 
         existing_complete = {p['platform'] for p in dashboard_data['device_platforms'] if p['is_complete']}
         need_device_invalidate = False
@@ -1017,6 +1022,7 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
             cached = await redis_cache.get(owner_key)
             if cached:
                 petkit_devices = _trim_petkit_payload(cached)
+                logger.info(f"[CacheLog] user={user_id} PKT设备 HIT owner_key={owner_key} count={len(cached) if isinstance(cached, list) else '?'}")
             else:
                 # 【修复】所有者缓存 miss → 尝试从当前用户缓存回退
                 self_key = f"user_{user_id}_petkit_devices"
@@ -1025,39 +1031,61 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
                     petkit_devices = _trim_petkit_payload(self_cached)
                     # 预热所有者缓存
                     await redis_cache.set(owner_key, self_cached, ttl=300)
-                    logger.debug(f"[Dashboard] 从 {self_key} 回填 {owner_key}")
+                    logger.info(f"[CacheLog] user={user_id} PKT设备 MISS owner → HIT self_key={self_key} 已回填 {owner_key} count={len(self_cached) if isinstance(self_cached, list) else '?'}")
+                else:
+                    logger.info(f"[CacheLog] user={user_id} PKT设备 双MISS owner={owner_key} self={self_key} → 返回空列表")
+        else:
+            logger.info(f"[CacheLog] user={user_id} PKT设备 无pk_user_id(无PetKit配置)")
 
         cp_user_id = await _get_cp_user_for_dashboard(user_id, user_platforms, shared_creds)
         cloudpets_servings = {}
         cloudpets_plans = []
         if cp_user_id:
-            owner_key = f"user_{cp_user_id}_cloudpets_servings"
-            cached_sv = await redis_cache.get(owner_key)
+            owner_sv_key = f"user_{cp_user_id}_cloudpets_servings"
+            cached_sv = await redis_cache.get(owner_sv_key)
             if cached_sv:
                 cloudpets_servings = cached_sv
+                logger.info(f"[CacheLog] user={user_id} CP servings HIT owner_key={owner_sv_key} result={cached_sv.get('result', '?')}")
             else:
                 # 【修复】所有者缓存 miss → 从当前用户缓存回退
-                self_key = f"user_{user_id}_cloudpets_servings"
-                self_sv = await redis_cache.get(self_key)
+                self_sv_key = f"user_{user_id}_cloudpets_servings"
+                self_sv = await redis_cache.get(self_sv_key)
                 if self_sv:
                     cloudpets_servings = self_sv
-                    await redis_cache.set(owner_key, self_sv, ttl=120)
+                    await redis_cache.set(owner_sv_key, self_sv, ttl=120)
+                    logger.info(f"[CacheLog] user={user_id} CP servings MISS owner → HIT self_key={self_sv_key} 已回填 result={self_sv.get('result', '?')}")
+                else:
+                    logger.info(f"[CacheLog] user={user_id} CP servings 双MISS owner={owner_sv_key} self={self_sv_key} → 返回空")
 
-            owner_key = f"user_{cp_user_id}_cloudpets_plans"
-            cached_pl = await redis_cache.get(owner_key)
+            owner_pl_key = f"user_{cp_user_id}_cloudpets_plans"
+            cached_pl = await redis_cache.get(owner_pl_key)
             if cached_pl:
                 cloudpets_plans = cached_pl
+                logger.info(f"[CacheLog] user={user_id} CP plans HIT owner_key={owner_pl_key} count={len(cached_pl) if isinstance(cached_pl, list) else '?'}")
             else:
-                self_key = f"user_{user_id}_cloudpets_plans"
-                self_pl = await redis_cache.get(self_key)
+                self_pl_key = f"user_{user_id}_cloudpets_plans"
+                self_pl = await redis_cache.get(self_pl_key)
                 if self_pl:
                     cloudpets_plans = self_pl
-                    await redis_cache.set(owner_key, self_pl, ttl=300)
-                cloudpets_plans = cached_pl
+                    await redis_cache.set(owner_pl_key, self_pl, ttl=300)
+                    logger.info(f"[CacheLog] user={user_id} CP plans MISS owner → HIT self_key={self_pl_key} 已回填 count={len(self_pl) if isinstance(self_pl, list) else '?'}")
+                else:
+                    logger.info(f"[CacheLog] user={user_id} CP plans 双MISS owner={owner_pl_key} self={self_pl_key} → 返回空列表")
+        else:
+            logger.info(f"[CacheLog] user={user_id} CP 无cp_user_id(无CloudPets配置)")
 
         dashboard_data['petkit_devices'] = petkit_devices
         dashboard_data['cloudpets_servings'] = cloudpets_servings
         dashboard_data['cloudpets_plans'] = cloudpets_plans
+
+        # 【新增】Dashboard 数据汇总日志
+        logger.info(
+            f"[CacheLog] === Dashboard 数据总览 user={user_id} === "
+            f"petkit_devices={len(petkit_devices) if petkit_devices else 0}台 | "
+            f"cloudpets_servings={cloudpets_servings.get('result', '?') if isinstance(cloudpets_servings, dict) else '?'}次 | "
+            f"cloudpets_plans={len(cloudpets_plans) if cloudpets_plans else 0}个 | "
+            f"shared_creds_keys={list(shared_creds.keys()) if shared_creds else '无'}"
+        )
 
         # ── 4. 体脂秤状态 + 今日统计（DB 查询，Redis 缓存 60s） ──
         scale_cache_key = f"scale_stats:user_{user_id}"
@@ -1215,6 +1243,7 @@ async def petkit_devices(current_user: User = Depends(get_current_user)):
             devices = await service.get_devices()
             # 写当前用户缓存
             await redis_cache.set(f"user_{user_id}_petkit_devices", devices, ttl=300)
+            logger.info(f"[CacheLog] 写入PKT缓存: user={user_id} key=user_{user_id}_petkit_devices count={len(devices) if isinstance(devices, list) else '?'} TTL=300s")
             # 【修复】共享用户获取数据后，同步写入所有者的权威缓存
             # 确保 Dashboard（读所有者键）立即可见
             await _warm_owner_cache_if_shared(user_id, "petkit", f"user_{user_id}_petkit_devices", devices)
@@ -1431,9 +1460,10 @@ async def cloudpets_servings_today(current_user: User = Depends(get_current_user
 
         # 【修复】不缓存错误响应（如 business logic 401），避免缓存污染
         if isinstance(result, dict) and str(result.get("code")) in ("401", "500", "403"):
-            logger.warning(f"[Cache] 跳过缓存 CloudPets 错误响应: code={result.get('code')}, msg={result.get('message')}")
+            logger.warning(f"[CacheLog] 跳过缓存 CP servings 错误响应: user={user_id} code={result.get('code')}")
         else:
             await redis_cache.set(cache_key, result, ttl=120)
+            logger.info(f"[CacheLog] 写入CP servings缓存: user={user_id} key={cache_key} result={result.get('result', '?')} TTL=120s")
             # 【修复】共享用户预热所有者权威缓存
             await _warm_owner_cache_if_shared(user_id, "cloudpets", cache_key, result)
         return result
@@ -1483,12 +1513,14 @@ async def cloudpets_get_plans(current_user: User = Depends(get_current_user)):
 
         if isinstance(plans, list) and len(plans) > 0:
             await redis_cache.set(cache_key, plans, ttl=300)
+            logger.info(f"[CacheLog] 写入CP plans缓存: user={user_id} key={cache_key} count={len(plans)} TTL=300s")
             # 【修复】共享用户预热所有者权威缓存
             await _warm_owner_cache_if_shared(user_id, "cloudpets", cache_key, plans)
         elif isinstance(plans, dict) and str(plans.get("code")) in ("401", "500", "403"):
-            logger.warning(f"[Cache] 跳过缓存 CloudPets 计划错误响应: code={plans.get('code')}")
+            logger.warning(f"[CacheLog] 跳过缓存 CP plans 错误响应: user={user_id} code={plans.get('code')}")
         else:
             await redis_cache.set(cache_key, plans, ttl=60)
+            logger.info(f"[CacheLog] 写入CP plans缓存(少量/空): user={user_id} key={cache_key} count={len(plans) if isinstance(plans, list) else '?'} TTL=60s")
             await _warm_owner_cache_if_shared(user_id, "cloudpets", cache_key, plans)
         return plans
     except Exception as e:

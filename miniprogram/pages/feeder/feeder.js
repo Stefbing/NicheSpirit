@@ -1,5 +1,16 @@
 const cloudRequest = require('../../utils/cloud_request.js');
 
+/**
+ * 【修复】记录每个外部接口调用的请求参数与返回数据
+ */
+function logApiCall(apiName, path, method, data, response, isError) {
+  const prefix = isError ? '❌' : '✅';
+  const truncated = response !== undefined && response !== null
+    ? (typeof response === 'object' ? JSON.stringify(response).slice(0, 500) : String(response).slice(0, 500))
+    : '(empty)';
+  console.log(`[API] ${prefix} ${apiName} | ${method} ${path} | req=${JSON.stringify(data || {})} | res=${truncated}`);
+}
+
 Page({
   data: {
     plans: [],
@@ -8,6 +19,8 @@ Page({
     feedAmount: 1, // 投喂份量
     todayServings: 0, // 今日已喂次数
     deviceName: '云宠喂食器', // 设备名称
+    // 【新增】设备状态
+    feederStatus: null,
     showAddPlanDialog: false, // 显示添加计划弹窗
     planTime: '', // 计划时间
     planAmount: 1, // 计划份量
@@ -19,6 +32,7 @@ Page({
     this.setData({ _onLoadCalled: true });
     this.fetchPlans();
     this.fetchTodayServings();
+    this.fetchStatus();
   },
 
   onShow() {
@@ -42,10 +56,13 @@ Page({
     const userInfo = wx.getStorageSync('userInfo');
     if (!userInfo || !userInfo.user_id) return;
     
+    const path = `/api/cloudpets/servings_today?user_id=${userInfo.user_id}`;
+    console.log('[API] 📤 GET', path);
     cloudRequest.callContainer({
-      path: `/api/cloudpets/servings_today?user_id=${userInfo.user_id}`,
+      path,
       method: 'GET',
       success: res => {
+        logApiCall('fetchTodayServings', path, 'GET', null, res);
         if (res && typeof res === 'object' && res.result !== undefined) {
           this.setData({ todayServings: res.result });
         } else if (typeof res === 'number') {
@@ -53,6 +70,7 @@ Page({
         }
       },
       fail: err => {
+        logApiCall('fetchTodayServings', path, 'GET', null, err, true);
         console.error('获取今日喂食次数失败:', err);
       }
     });
@@ -71,11 +89,15 @@ Page({
       title: '正在投喂...'
     });
 
+    const path = `/api/cloudpets/feed?user_id=${userInfo.user_id}`;
+    const data = { amount: feedAmount };
+    console.log('[API] 📤 POST', path, data);
     cloudRequest.callContainer({
-      path: `/api/cloudpets/feed?user_id=${userInfo.user_id}`,
+      path,
       method: 'POST',
-      data: { amount: feedAmount },
+      data,
       success: res => {
+        logApiCall('feedOne', path, 'POST', data, res);
         wx.hideLoading();
         this.setData({ actionLoading: false });
         wx.showToast({
@@ -125,9 +147,12 @@ Page({
     if (!userInfo || !userInfo.user_id) return;
     
     this.setData({ loading: true });
+    const path = `/api/cloudpets/plans?user_id=${userInfo.user_id}`;
+    console.log('[API] 📤 GET', path);
     cloudRequest.callContainer({
-      path: `/api/cloudpets/plans?user_id=${userInfo.user_id}`,
+      path,
       success: res => {
+        logApiCall('fetchPlans', path, 'GET', null, res);
         // callContainer 已返回业务数据
         this.setData({
           plans: res || [],
@@ -176,11 +201,14 @@ Page({
     plans[index] = plan;
     this.setData({ plans });
 
+    const path = `/api/cloudpets/plans/${plan.id}?user_id=${wx.getStorageSync('userInfo').user_id}`;
+    console.log('[API] 📤 PUT', path, plan);
     cloudRequest.callContainer({
-      path: `/api/cloudpets/plans/${plan.id}?user_id=${wx.getStorageSync('userInfo').user_id}`,
+      path,
       method: 'PUT',
       data: plan,
       success: () => {
+        logApiCall('togglePlan', path, 'PUT', plan, 'ok');
         wx.showToast({
           title: e.detail.value ? '已启用' : '已禁用',
           icon: 'success'
@@ -282,11 +310,14 @@ Page({
       weekdays: [1, 2, 3, 4, 5, 6, 7] // 默认每天
     };
 
+    const path = `/api/cloudpets/plans?user_id=${wx.getStorageSync('userInfo').user_id}`;
+    console.log('[API] 📤 POST', path, newPlan);
     cloudRequest.callContainer({
-      path: `/api/cloudpets/plans?user_id=${wx.getStorageSync('userInfo').user_id}`,
+      path,
       method: 'POST',
       data: newPlan,
       success: () => {
+        logApiCall('submitPlan', path, 'POST', newPlan, 'ok');
         wx.hideLoading();
         wx.showToast({ title: '添加成功', icon: 'success' });
         this.closeAddPlanModal();
@@ -330,10 +361,13 @@ Page({
         if (res.confirm) {
           wx.showLoading({ title: '删除中...' });
 
+          const path = `/api/cloudpets/plans/${planId}?user_id=${wx.getStorageSync('userInfo').user_id}`;
+          console.log('[API] 📤 DELETE', path);
           cloudRequest.callContainer({
-            path: `/api/cloudpets/plans/${planId}?user_id=${wx.getStorageSync('userInfo').user_id}`,
+            path,
             method: 'DELETE',
             success: () => {
+              logApiCall('deletePlan', path, 'DELETE', null, 'ok');
               wx.hideLoading();
               wx.showToast({ title: '删除成功', icon: 'success' });
               this.fetchPlans(); // 刷新计划列表
@@ -393,6 +427,30 @@ Page({
   },
   
   /**
+   * 【新增】获取喂食器联网状态
+   * 下拉刷新时一并调用，补充设备实时状态信息
+   */
+  fetchStatus() {
+    const userInfo = wx.getStorageSync('userInfo');
+    if (!userInfo || !userInfo.user_id) return;
+
+    const path = `/api/cloudpets/feeder/status?user_id=${userInfo.user_id}`;
+    console.log('[API] 📤 GET', path);
+    cloudRequest.callContainer({
+      path,
+      method: 'GET',
+      success: res => {
+        logApiCall('fetchStatus', path, 'GET', null, res);
+        this.setData({ feederStatus: res });
+      },
+      fail: err => {
+        logApiCall('fetchStatus', path, 'GET', null, err, true);
+        console.warn('[Feeder] 获取设备状态失败（非致命）:', err);
+      }
+    });
+  },
+
+  /**
    * 转发给朋友 - 通过页内分享按钮触发，仅分享当前设备
    */
   onShareAppMessage(res) {
@@ -422,7 +480,6 @@ Page({
       path: '/api/share/create',
       method: 'POST',
       data: {
-        from_user_id: userInfo.user_id,
         device_keys: ['cloudpets_cloudpets'],
       },
       success: (res) => {
