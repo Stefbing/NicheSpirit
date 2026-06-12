@@ -1024,7 +1024,6 @@ Page({
         path: '/api/share/create',
         method: 'POST',
         data: {
-          from_user_id: userInfo.user_id,
           device_keys: allKeys,
         },
       })
@@ -1054,15 +1053,11 @@ Page({
     // 分享后清除暂存 token
     this._pendingShareToken = ''
 
-    // 如果是从右上角菜单转发（无 token），尝试创建分享
+    // 如果是从右上角菜单转发（无 token），异步创建分享记录 + 携带 from_uid
     if (!token && userInfo) {
-      // 静默创建分享：异步发起，但 WeChat 分享卡片参数需同步返回
-      // 采用懒加载策略：传参带特殊标记，B 打开时后端实时查询
-      return {
-        title: `${userName} 邀请您使用智能设备`,
-        path: `/pages/index/index?from_uid=${userId || ''}`,
-        imageUrl: '',
-      }
+      // 【修复】异步创建后台分享记录，确保 B 的 from_uid 兜底查询能找到
+      this._createShareAsync(userId, userName)
+      return this._buildMenuShareCard(userName, userId)
     }
 
     return {
@@ -1070,6 +1065,47 @@ Page({
       // 【修复】同时携带 share_token 和 from_uid，from_uid 作为兜底
       // 即使 share_token 在入口参数中丢失，仍可通过 from_uid 反查分享
       path: `/pages/index/index?share_token=${token}&from_uid=${userId}`,
+      imageUrl: '',
+    }
+  },
+
+  /**
+   * 【新增】异步创建分享记录（右上角菜单分享时调用）
+   * 确保 B 通过 from_uid 查询时能查到有效的 pending 分享
+   */
+  async _createShareAsync(userId, userName) {
+    try {
+      console.log('[Share] 📝 右上角菜单分享，异步创建分享记录...')
+      // 收集所有设备的 device_key
+      const allKeys = []
+      this.data.userDevices.forEach(d => {
+        if (d.device_key) allKeys.push(d.device_key)
+      })
+      if (allKeys.length === 0) {
+        console.warn('[Share] ⚠️ 异步创建分享跳过：无可用设备')
+        return
+      }
+      const res = await cloudRequest.callContainer({
+        path: '/api/share/create',
+        method: 'POST',
+        data: { device_keys: allKeys },
+      })
+      if (res && res.share_token) {
+        console.log('[Share] ✅ 异步创建分享成功:', res.share_token)
+      }
+    } catch (err) {
+      // 异步创建失败不影响主流程
+      console.warn('[Share] ⚠️ 异步创建分享失败（非致命）:', err)
+    }
+  },
+
+  /**
+   * 【新增】构建右上角菜单分享的卡片（无 share_token，仅 from_uid）
+   */
+  _buildMenuShareCard(userName, userId) {
+    return {
+      title: `${userName} 邀请您使用智能设备`,
+      path: `/pages/index/index?from_uid=${userId || ''}`,
       imageUrl: '',
     }
   },
@@ -1091,6 +1127,7 @@ Page({
   /**
    * 【修复】通过 from_uid 反查后端 pending 分享（兜底方案）
    * 当 share_token 在入口参数中丢失时，用分享者ID反查最新pending分享
+   * 【增强】现在也支持已接受的分享，直接刷新设备列表而非再次弹窗接受
    */
   async checkPendingShareByFromUid(fromUserId) {
     if (!fromUserId) return
@@ -1104,8 +1141,18 @@ Page({
       })
       console.log('[Share] from_uid 反查结果:', res)
       if (res && res.found && res.share && res.share.share_token) {
-        console.log('[Share] ✅ from_uid 兜底成功，找到分享 token:', res.share.share_token)
-        this.handleIncomingShare(res.share.share_token)
+        if (res.share.status === 'accepted') {
+          // 【修复】分享已被接受 → 直接刷新设备列表，无需再次弹窗
+          console.log('[Share] ✅ 分享已被接受，刷新设备列表')
+          app.globalData._pendingShareToken = ''
+          this.isLoadingDevices = false
+          this.devicesLoaded = false
+          await this.loadUserDevices(true)
+        } else {
+          // pending 状态 → 正常弹窗接受
+          console.log('[Share] ✅ from_uid 兜底成功，找到分享 token:', res.share.share_token)
+          this.handleIncomingShare(res.share.share_token)
+        }
       } else {
         console.log('[Share] ℹ️ from_uid 未找到可用分享')
       }
@@ -1163,7 +1210,6 @@ Page({
         method: 'POST',
         data: {
           share_token: this.data.shareToken,
-          to_user_id: userInfo.user_id,
         },
       })
 

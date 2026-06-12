@@ -146,6 +146,23 @@ async def accept_share(request: AcceptShareRequest, current_user: User = Depends
     ).first()
 
     if not share:
+        # 【修复】检查是否已被当前用户接受过 → 直接返回成功
+        existing = session.exec(
+            select(DeviceShare).where(
+                DeviceShare.share_token == request.share_token,
+                DeviceShare.status == "accepted",
+                DeviceShare.to_user_id == to_user_id,
+            )
+        ).first()
+        if existing:
+            logger.info(f'[AcceptShare] 分享已被当前用户接受过，直接跳过: share_id={existing.id}')
+            return {
+                "success": True,
+                "message": "此设备已在您的设备列表中",
+                "already_accepted": True,
+                "configured": [],
+                "expire_duration_hours": 24,
+            }
         raise HTTPException(status_code=404, detail="分享链接无效或已过期")
 
     now_ms = int(time.time() * 1000)
@@ -456,10 +473,20 @@ async def list_shares(role: str = "from", current_user: User = Depends(_get_curr
 @router.get("/pending-from-user")
 async def pending_share_from_user(from_user_id: int, session: Session = Depends(get_session)):
     """
-    查询指定分享者最新的 pending 分享（from_uid 兜底方案）
+    查询指定分享者最新的分享（from_uid 兜底方案）
     当 share_token 在入口参数中丢失时，通过 from_user_id 反查分享记录
+
+    查找优先级：
+    1. 首先查询 status="pending" 的分享（未接受过的链接）
+    2. 如果未找到，再查询 status="accepted" 且未过期的分享
+    3. 如果都未找到，返回 not found
+
+    【修复】当 A 通过右上角菜单分享（无 share_token）时，
+    确保 B 能通过 from_uid 查询到分享记录，无论其状态是 pending 还是 accepted。
     """
     now_ms = int(time.time() * 1000)
+
+    # 优先查找 pending 分享
     share = session.exec(
         select(DeviceShare).where(
             DeviceShare.from_user_id == from_user_id,
@@ -468,16 +495,28 @@ async def pending_share_from_user(from_user_id: int, session: Session = Depends(
     ).first()
 
     if not share:
+        # 【修复】兜底查找 accepted 且未过期的分享
+        share = session.exec(
+            select(DeviceShare).where(
+                DeviceShare.from_user_id == from_user_id,
+                DeviceShare.status == "accepted",
+                DeviceShare.expires_at > now_ms,
+            ).order_by(DeviceShare.created_at.desc())
+        ).first()
+
+    if not share:
         return {"found": False, "share": None}
 
-    # 检查链接是否过期
-    link_expiry = share.created_at + 24 * 3600 * 1000
-    if now_ms > link_expiry:
-        share.status = "revoked"
-        session.add(share)
-        session.commit()
-        return {"found": False, "share": None}
+    # 检查 pending 分享的链接时效（created_at + 24h）
+    if share.status == "pending":
+        link_expiry = share.created_at + 24 * 3600 * 1000
+        if now_ms > link_expiry:
+            share.status = "revoked"
+            session.add(share)
+            session.commit()
+            return {"found": False, "share": None}
 
+    # 【修复】return 中包含 status 供前端判断
     return {
         "found": True,
         "share": _format_share_output(share),

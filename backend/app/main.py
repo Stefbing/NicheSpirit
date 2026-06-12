@@ -843,7 +843,9 @@ async def get_dashboard_data(current_user: User = Depends(get_current_user), ses
         shared_creds = await redis_cache.get(shared_cache_key)
         if shared_creds is None:
             shared_creds = await _get_shared_platform_credentials(user_id)
-            await redis_cache.set(shared_cache_key, shared_creds, ttl=60)
+            # 【修复】空结果仅缓存 10s（避免写入后 60s 内查询不到），非空缓存 60s
+            empty_ttl = 10
+            await redis_cache.set(shared_cache_key, shared_creds, ttl=empty_ttl if not shared_creds else 60)
 
         existing_complete = {p['platform'] for p in dashboard_data['device_platforms'] if p['is_complete']}
         need_device_invalidate = False
